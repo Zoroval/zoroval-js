@@ -21,7 +21,7 @@ import { RUNTIME } from "./runtime.js";
 import type { AlsLike } from "./runtime.js";
 import { sampleKey, sampleKeep } from "./processor.js";
 import { getState } from "./state.js";
-import { KIND_INTERNAL, Span } from "./span.js";
+import { KIND_CLIENT, KIND_INTERNAL, Span } from "./span.js";
 import type { AttrValue } from "./span.js";
 import { addCount, guard, internalError, logOnce, sha256Hex } from "./util.js";
 
@@ -142,7 +142,7 @@ export function cleanTags(tags: Iterable<unknown> | null | undefined): string[] 
 // ---------------------------------------------------------------------------- capture helpers
 
 /** False when content must not be serialized for this span (capture off, span ended, or sampled out). */
-function contentAllowed(obs: Observation): boolean {
+export function contentAllowed(obs: Observation): boolean {
   const state = getState();
   if (!state || !obs.span || obs.span.ended || !state.cfg.captureContent) return false;
   if (state.cfg.sampleRate < 1) {
@@ -211,11 +211,13 @@ function rootAttributes(userId: Id | undefined, tags: string[] | undefined, stor
 }
 
 /** Span status ERROR plus a standard `exception` event with a capped stack. */
-function recordError(span: Span, error: unknown): void {
+export function recordError(span: Span, error: unknown): void {
   guard("recordError", () => {
     const limit = getState()?.cfg.maxStackBytes ?? 16 * 1024;
     const isError = error instanceof Error;
-    const type = isError ? error.name || "Error" : typeof error;
+    // Libraries often subclass Error without setting `name` (openai's RateLimitError): the class name
+    // is what Python records (`__qualname__`).
+    const type = isError ? (error.name && error.name !== "Error" ? error.name : error.constructor?.name || "Error") : typeof error;
     const text = isError ? error.message : String(error);
     span.setError(`${type}: ${text}`.slice(0, 32768));
     let stack = isError && typeof error.stack === "string" ? error.stack : "";
@@ -513,6 +515,69 @@ function runSpan<T>(spec: SpanSpec, fn: (obs: Observation) => T): T {
   }
   finishSpan(active, null, false);
   return result;
+}
+
+// ---------------------------------------------------------------------------- generations
+
+/** How long a generation that never ended (a stream nobody read) keeps flush() waiting. */
+const OPEN_GENERATION_MS = 300_000;
+
+export interface GenerationHandle {
+  readonly obs: Observation;
+  readonly span: Span;
+  /** Run `fn` with this span current, so the provider's own work and nested calls see it. */
+  run<T>(fn: () => T): T;
+  end(): void;
+}
+
+/**
+ * Open a generation span (one LLM call) under the current span; null when there is nothing to record:
+ * the SDK is off, or a generation is already open here (`wrapOpenAI` and `wrapFetch` together, or
+ * `parse()` calling `create()`), which is Python's "no duplicate span" rule.
+ *
+ * Every generation counts as open work for flush(), like a root: a streamed reply can end after its
+ * turn has returned the `Response`. `base` is written first and `request` last, as in Python.
+ */
+export function startGeneration(
+  name: string, base: Record<string, AttrValue>, request: Record<string, AttrValue>,
+): GenerationHandle | null {
+  const state = getState();
+  if (!state) return null;
+  const store = currentStore();
+  const parent = store.span;
+  if (parent && !parent.ended && parent.attributes[OBS_TYPE] === "generation") return null;
+  const attrs: Record<string, AttrValue> = { ...base, [OBS_TYPE]: "generation", ...conversationAttributes(store) };
+  if (!parent) Object.assign(attrs, rootAttributes(undefined, undefined, store));
+  Object.assign(attrs, request);
+  const span = new Span(name, KIND_CLIENT, parent, attrs);
+  const obs = new Observation(span, "generation", false, store.conversation?.id ?? null);
+  const processor = state.processor;
+  processor.rootStarted();
+  let open = true;
+  const release = () => {
+    if (!open) return;
+    open = false;
+    clearTimeout(timer);
+    guard("rootEnded", () => processor.rootEnded(), undefined);
+  };
+  const timer = setTimeout(release, OPEN_GENERATION_MS);
+  (timer as { unref?: () => void }).unref?.();
+  const inner: Store = { ...store, span };
+  const scoped = getAls();
+  return {
+    obs,
+    span,
+    run: (fn) => (scoped ? scoped.run(inner, fn) : fn()),
+    end() {
+      try {
+        if (span.end()) processor.onEnd(span);
+      } catch (error) {
+        internalError("generation.end", error);
+      } finally {
+        release();
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------- public functions
