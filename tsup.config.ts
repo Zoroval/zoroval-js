@@ -17,13 +17,13 @@ export default defineConfig([
     entry: { index: "src/entry.default.ts", node: "src/entry.node.ts", edge: "src/entry.edge.ts", workerd: "src/entry.workerd.ts" },
     format: ["esm"],
     clean: true,
-    dts: { entry: { index: "src/api.ts" } },
+    dts: { entry: { index: "src/api.ts" }, compilerOptions: { stripInternal: true } },
   },
   {
     ...shared,
     entry: { index: "src/entry.default.ts", node: "src/entry.node.ts", edge: "src/entry.edge.ts", workerd: "src/entry.workerd.cjs.ts" },
     format: ["cjs"],
     clean: false,
-    dts: { entry: { index: "src/api.ts" } },
+    dts: { entry: { index: "src/api.ts" }, compilerOptions: { stripInternal: true } },
   },
 ]);
