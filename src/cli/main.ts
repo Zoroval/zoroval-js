@@ -10,7 +10,7 @@ import * as detect from "./detect.js";
 import * as doctor from "./doctor.js";
 import { pyJson } from "./pyjson.js";
 import * as login from "./login.js";
-import { defaultEnvFile } from "./project.js";
+import { projectInfo } from "./lang.js";
 import * as setupReport from "./setup-report.js";
 
 // Node 20.6+ reads `--env-file` itself, even after the script name, and exits 9 when that file does not
@@ -102,7 +102,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     const root = String(v.root || ".");
-    const envFile = typeof v.envFile === "string" ? v.envFile : defaultEnvFile(resolve(root));
+    const envFile = typeof v.envFile === "string" ? v.envFile : projectInfo(resolve(root)).envFile;
     if (command === "login") {
       return await login.run({
         root,

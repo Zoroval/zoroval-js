@@ -26,7 +26,7 @@ const KEYS = ["root", "services", "packages", "imports", "llm_calls", "tracing",
 
 // ------------------------------------------------------------------ Python: the same report as the Python CLI
 
-for (const name of ["python-app", "python-edge", "python-langfuse", "python-otel"]) {
+for (const name of ["python-app", "python-edge", "python-langfuse", "python-otel", "python-worker-forward"]) {
   test(`${name}: the report equals the one the Python CLI wrote (snapshot of Python 0.2.0 output)`, () => {
     const dir = prepareFixture(join(fixtures, name));
     const r = detect(dir, "--json");
@@ -215,7 +215,8 @@ test("a Python repo with a TypeScript front end gets both, Python plan first", (
   const out = JSON.parse(detect(dir, "--json").stdout);
   assert.deepEqual(out.services.map((s) => `${s.kind}:${s.path}`), ["python:.", "typescript:web"]);
   assert.ok(out.llm_calls.some((c) => c.file === "chat.py") && out.llm_calls.some((c) => c.file === "web/app/api/chat/route.ts"));
-  assert.equal(out.plan[0], "Add `zoroval` to the Python dependencies.");
+  assert.match(out.plan[0], /^Two languages in this repo \(Python: chat\.py; TypeScript: web\/app\/api\/chat\/route\.ts\)/);
+  assert.equal(out.plan[1], "Add `zoroval` to the Python dependencies.");
   assert.ok(out.plan.includes("Install the package: `npm install zoroval` (or the project's package manager)."));
   assert.equal(out.plan.filter((s) => s.startsWith("Run `")).length, 1);
 });
@@ -246,4 +247,42 @@ test("a Hono app that is not a Worker main is still found; a server import witho
   const dir = makeProject({ files: { "package.json": '{"dependencies":{"hono":"4"}}', "src/app.ts": 'import { Hono } from "hono";\nexport const app = new Hono();', "src/types.ts": 'import type { Request } from "express";\nexport type R = Request;' } });
   const out = JSON.parse(detect(dir, "--json").stdout);
   assert.deepEqual(out.entry_points, [{ file: "src/app.ts", line: 2, kind: "hono" }]);
+});
+
+// ------------------------------------------------------------------ the language follows where the model is called
+
+test("a Python app behind a forwarding Worker is a Python project: no TypeScript plan, no Worker notes, Python's own report", () => {
+  const { out } = report("python-worker-forward");
+  assert.deepEqual(out.llm_calls, [{ file: "prompt.py", line: 7, provider: "openai", api: "responses.parse" }]);
+  assert.deepEqual(out.typescript, { signals: [] });
+  assert.deepEqual(out.entry_points, [{ file: "main.py", line: null, kind: "script" }]);
+  assert.deepEqual(out.serverless, []);
+  assert.ok(out.plan.every((s) => !/npm|wrangler|nodejs_als|Worker|npx/.test(s)), out.plan.join("\n"));
+  assert.ok(out.plan.includes("Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`."));
+  assert.ok(out.notes.every((n) => !/nodejs_als|compatibility/.test(n)));
+  assert.deepEqual(out.env.env_files.map((e) => e.path), [".env", ".env.example"]);
+});
+
+test("a Worker with its own model call is a TypeScript project, noted when it lacks the flag", () => {
+  const { out } = report("worker-noals", WORKER_ENV);
+  assert.ok(out.notes.some((n) => /nodejs_als/.test(n)));
+  assert.ok(out.plan.some((s) => s.startsWith("Install the package: `npm install zoroval`")));
+});
+
+test("a repo with a model call in Python and one in a Worker names both SDKs", () => {
+  const { out } = report("mixed-worker", WORKER_ENV);
+  assert.equal(out.plan[0], "Two languages in this repo (Python: app/prompt.py; TypeScript: worker/index.ts): set each one up with its own SDK (`pip install zoroval` for Python, `npm install zoroval` for TypeScript).");
+  assert.ok(out.plan.includes("Add `zoroval` to the Python dependencies."));
+  assert.ok(out.plan.includes("Install the package: `npm install zoroval` (or the project's package manager)."));
+  assert.ok(out.notes.some((n) => /^wrangler\.toml has neither the nodejs_als/.test(n)));
+  assert.deepEqual(out.llm_calls.map((c) => c.file), ["app/prompt.py", "worker/index.ts"]);
+});
+
+test("no model call anywhere: the plan follows the manifests", () => {
+  const dir = makeProject({ files: { "requirements.txt": "flask\n", "web/package.json": "{}" } });
+  const out = JSON.parse(detect(dir, "--json").stdout);
+  assert.ok(out.notes.includes("No OpenAI or Anthropic client found. Other providers need OTel GenAI instrumentation."));
+  assert.ok(out.plan[0].startsWith("Two languages in this repo:"));
+  const pyOnly = JSON.parse(detect(makeProject({ files: { "requirements.txt": "flask\n" } }), "--json").stdout);
+  assert.equal(pyOnly.plan[0], "Add `zoroval` to the Python dependencies.");
 });

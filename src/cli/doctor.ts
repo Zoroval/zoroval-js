@@ -28,7 +28,7 @@ import * as envfile from "./envfile.js";
 import { getJson } from "./http.js";
 import type { Json } from "./http.js";
 import { CMD } from "./login.js";
-import { envFileCandidates, findWrangler } from "./project.js";
+import { envFileCandidates, projectInfo } from "./lang.js";
 import * as setupReport from "./setup-report.js";
 import { DEFAULT_INGEST_URL } from "./constants.js";
 
@@ -133,8 +133,9 @@ const num = (value: unknown): number => {
 const obj = (value: unknown): Json => (value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {});
 
 function workerCheck(report: Report, root: string): void {
-  const worker = findWrangler(root);
-  if (!worker || worker.als) return;
+  // Only a Worker that calls a model (or uses zoroval) needs the flag; a Worker that forwards requests to a container does not.
+  const { worker, workerRelevant } = projectInfo(root);
+  if (!worker || !workerRelevant || worker.als) return;
   const how = worker.file.endsWith(".toml")
     ? 'compatibility_flags = ["nodejs_als"]'
     : '"compatibility_flags": ["nodejs_als"]';

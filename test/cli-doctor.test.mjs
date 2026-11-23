@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
 import { KEY, SETUP_CODE, makeProject, runCli, startApp, startGateway } from "./cli-fakes.mjs";
+import { prepareFixture } from "./fixtures-prepare.mjs";
 
 const doctor = (gw, dir, extra = [], env = {}) =>
   runCli(["doctor", "--root", dir, "--ingest-url", gw.url, "--timeout", "5", ...extra], { cwd: dir, env: { ZOROVAL_INGEST_KEY: KEY, ...env } });
@@ -249,9 +250,11 @@ test("ungrouped turns, dropped spans and ingest errors are warnings", async () =
 
 // ------------------------------------------------------------------ the Worker context flag
 
+const WORKER_CALLS_OPENAI = 'export default { fetch() { return fetch("https://api.openai.com/v1/responses"); } };';
 const workerChecks = async (files, expectWarn) => {
   const gw = await startGateway({ firstTrace: "2026-11-23T10:00:00Z" });
-  const dir = makeProject({ files });
+  // the Worker itself calls a model, so it needs the flag
+  const dir = makeProject({ files: { "src/index.ts": WORKER_CALLS_OPENAI, ...files } });
   const r = await doctor(gw, dir, ["--no-test-trace", "--json"]);
   const warn = json(r).checks.find((c) => c.check === "worker context");
   assert.equal(r.code, 0, "a missing flag is a warning, never a failure");
@@ -270,7 +273,7 @@ test("a Worker without nodejs_als or nodejs_compat gets a warning that says how 
 });
 
 test("the warning comes before the key checks, so it shows even when the key is missing", async () => {
-  const dir = makeProject({ files: { "wrangler.toml": 'name = "w"' } });
+  const dir = makeProject({ files: { "wrangler.toml": 'name = "w"', "src/index.ts": WORKER_CALLS_OPENAI } });
   const r = await runCli(["doctor", "--root", dir, "--json"], { cwd: dir });
   assert.deepEqual(levels(r), ["pass:sdk", "warn:worker context", "fail:key"]);
   assert.equal(r.code, 1);
@@ -307,4 +310,18 @@ test("installed packages are listed from node_modules", async () => {
     { level: "pass", check: "package openai", detail: "5.1.0" },
   ]);
   await gw.close();
+});
+
+test("a Worker that only forwards to a container (the model is called from Python) gets no warning", async () => {
+  const gw = await startGateway({ firstTrace: "2026-11-23T10:00:00Z" });
+  const dir = prepareFixture(join(new URL("./fixtures/detect/", import.meta.url).pathname, "python-worker-forward"));
+  const r = await doctor(gw, dir, ["--no-test-trace", "--json"]);
+  assert.equal(r.code, 0);
+  assert.equal(json(r).checks.find((c) => c.check === "worker context"), undefined);
+  await gw.close();
+});
+
+test("a Worker that uses zoroval is checked even before its first model call", async () => {
+  const warn = await workerChecks({ "src/index.ts": 'import * as zoroval from "zoroval";\nexport default { fetch() { zoroval.init(); } };', "wrangler.toml": 'name = "w"\n' }, true);
+  assert.match(warn.detail, /^wrangler\.toml has neither/);
 });

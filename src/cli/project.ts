@@ -112,8 +112,3 @@ export function defaultEnvFile(root: string): string {
   const kind = projectKind(root);
   return kind === "worker" ? ".dev.vars" : kind === "next" ? ".env.local" : ".env";
 }
-
-/** Env files `doctor` looks in when `--env-file` is not given: the default first. */
-export function envFileCandidates(root: string): string[] {
-  return [...new Set([defaultEnvFile(root), ".dev.vars", ".env.local", ".env"])];
-}

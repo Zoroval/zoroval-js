@@ -13,8 +13,8 @@ import { DEFAULT_INGEST_URL, keyIdOf } from "../config.js";
 import * as envfile from "./envfile.js";
 import { postJson } from "./http.js";
 import type { Json } from "./http.js";
-import { projectKind } from "./project.js";
-import type { ProjectKind } from "./project.js";
+import { projectInfo } from "./lang.js";
+import type { Kind } from "./lang.js";
 import * as setupReport from "./setup-report.js";
 
 const SLOW_DOWN_STEP_S = 5; // RFC 8628: add 5 seconds after slow_down
@@ -68,7 +68,8 @@ function show(value: unknown): string {
 const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
 /** The closing line: how the key reaches the running app, and the production step for the platform. */
-export function nextMessage(kind: ProjectKind): string {
+export function nextMessage(kind: Kind): string {
+  if (kind === "python") return `Next: load the env file in your app (for example python-dotenv) and run \`zoroval doctor\`.`;
   if (kind === "worker") {
     return `Next: run \`${CMD} doctor\`. \`wrangler dev\` reads .dev.vars on its own. For production, make a key for production and run \`wrangler secret put ${envfile.KEY_VAR}\`.`;
   }
@@ -195,7 +196,7 @@ export async function run(o: LoginOptions, deps: Deps = defaultDeps()): Promise<
   say(`Key written to ${envName} as ${envfile.KEY_VAR} (key id ${show(body.key_id)}, project ${show(body.project_key)}). The key is not shown. File mode is 600.`);
   if (approved) say(`${handle || "Setup code"} connected to ${projectName || text(body.project_name) || show(body.project_key)}`);
   if (writeUrl) say(`${envfile.URL_VAR} was written too (${writeUrl}).`);
-  say(nextMessage(projectKind(o.root)));
+  say(nextMessage(projectInfo(o.root).kind));
   return 0;
 }
 

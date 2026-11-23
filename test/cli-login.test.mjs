@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test, beforeEach } from "node:test";
 import * as cli from "../.test-build/cli.js";
+import { prepareFixture } from "./fixtures-prepare.mjs";
 import { KEY, SETUP_CODE, REFUSALS, connectReply, keyReply, makeProject, runCli, startApp, sleep } from "./cli-fakes.mjs";
 
 const read = (dir, name) => readFileSync(join(dir, name), "utf8");
@@ -343,7 +344,7 @@ for (const [label, files, expected, message] of [
   ["wrangler.json", { "wrangler.json": '{"name":"w"}' }, ".dev.vars", WORKER_MESSAGE],
   ["wrangler.jsonc", { "wrangler.jsonc": '{\n // c\n "name": "w",\n}' }, ".dev.vars", WORKER_MESSAGE],
   ["Next.js (package.json)", { "package.json": '{"dependencies":{"next":"15.0.0"}}' }, ".env.local", NEXT_MESSAGE],
-  ["Next.js (next.config.mjs)", { "next.config.mjs": "export default {}" }, ".env.local", NEXT_MESSAGE],
+  ["Next.js (next.config.mjs)", { "package.json": "{}", "next.config.mjs": "export default {}" }, ".env.local", NEXT_MESSAGE],
   ["Worker and Next.js (the Worker wins)", { "wrangler.toml": 'name = "w"', "package.json": '{"dependencies":{"next":"15"}}' }, ".dev.vars", WORKER_MESSAGE],
   ["a plain Node project", { "package.json": '{"dependencies":{"express":"4"}}' }, ".env", /node --env-file=\.env.*dotenv.*npx zoroval doctor/],
   ["no package.json at all", {}, ".env", /dotenv/],
@@ -360,6 +361,27 @@ for (const [label, files, expected, message] of [
     await app.close();
   });
 }
+
+test("a Python app behind a forwarding Worker keeps its key in .env, with the Python next step", async () => {
+  const app = await manualApp();
+  const dir = prepareFixture(new URL("./fixtures/detect/python-worker-forward", import.meta.url).pathname, { env: {} });
+  const r = await login(app, dir, ["--no-browser"]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Key written to \.env as/);
+  assert.ok(read(dir, ".env").includes(KEY));
+  assert.equal(existsSync(join(dir, ".dev.vars")), false);
+  assert.match(r.stdout, /Next: load the env file in your app \(for example python-dotenv\) and run `zoroval doctor`\./);
+  await app.close();
+});
+
+test("a Worker with its own model call and a Python app: the Worker's .dev.vars is the default", async () => {
+  const app = await manualApp();
+  const dir = prepareFixture(new URL("./fixtures/detect/mixed-worker", import.meta.url).pathname, { env: {} });
+  const r = await login(app, dir, ["--no-browser"]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Key written to \.dev\.vars as/);
+  await app.close();
+});
 
 test("--env-file overrides the project type", async () => {
   const app = await manualApp();

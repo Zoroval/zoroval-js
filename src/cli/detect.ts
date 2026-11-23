@@ -176,7 +176,22 @@ const sortKeys = <T>(o: Record<string, T>): Record<string, T> => Object.fromEntr
 
 // ---------------------------------------------------------------------------- main scan
 
+/** Which SDK the project needs: where the model is called decides, not which config files exist. */
+export type Lang = "python" | "typescript" | "both";
+
+export interface ProjectInfo {
+  lang: Lang;
+  worker: Wrangler | null;
+  /** The Worker itself calls a model or uses zoroval, so it needs `nodejs_als` / `nodejs_compat`. */
+  workerRelevant: boolean;
+  nextProject: boolean;
+}
+
 export function scan(rootArg: string): Json {
+  return analyze(rootArg).report;
+}
+
+export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
   const root = resolve(rootArg);
   const report: Json = {
     root, services: [], packages: {}, imports: {}, llm_calls: [], tracing: {}, entry_points: [], chat_id_candidates: [],
@@ -186,8 +201,10 @@ export function scan(rootArg: string): Json {
   let pyPackages: Record<string, string> = {};
   const jsPackages: Record<string, string> = {};
   const envFiles: string[] = [];
+  const devVarsFiles: string[] = [];
   const pyFiles: string[] = [];
   const tsFiles: string[] = [];
+  const sigFiles: string[] = []; // the files Python's CLI reads for TypeScript signals
   const hintTexts: string[] = [];
 
   for (const path of walk(root)) {
@@ -215,12 +232,15 @@ export function scan(rootArg: string): Json {
     } else if (name === "package.json") {
       Object.assign(jsPackages, parsePackageJson(readText(path)));
       report.services.push({ path: posix.dirname(relPath), kind: "typescript", manifest: relPath });
-    } else if (name === ".env" || name.startsWith(".env.") || name.endsWith(".env") || name.startsWith(".dev.vars")) {
+    } else if (name === ".env" || name.startsWith(".env.") || name.endsWith(".env")) {
       envFiles.push(path);
+    } else if (name.startsWith(".dev.vars")) {
+      devVarsFiles.push(path);
     } else if (name.endsWith(".py")) {
       pyFiles.push(path);
-    } else if (TS_EXT.some((ext) => name.endsWith(ext)) && !name.endsWith(".d.ts")) {
-      tsFiles.push(path);
+    } else if (TS_EXT.some((ext) => name.endsWith(ext))) {
+      if (!name.endsWith(".cjs")) sigFiles.push(path);
+      if (!name.endsWith(".d.ts")) tsFiles.push(path);
     }
     if (DEPLOY_FILES.has(name) || ["k8s/", "kubernetes/", "helm/"].some((p) => relPath.startsWith(p))) {
       report.deploy_files.push(relPath);
@@ -281,7 +301,7 @@ export function scan(rootArg: string): Json {
   // typescript and javascript
   const tsSignals: Json[] = [];
   const tsScans = new Map<string, ReturnType<typeof scanJs>>();
-  for (const path of tsFiles) {
+  for (const path of sigFiles) {
     const text = readText(path);
     const relPath = rel(path, root);
     if (/from\s+['"]ai['"]|require\(['"]ai['"]\)/.test(text)) tsSignals.push({ file: relPath, signal: "vercel_ai_sdk" });
@@ -289,6 +309,10 @@ export function scan(rootArg: string): Json {
     if (text.includes("experimental_telemetry")) tsSignals.push({ file: relPath, signal: "ai_sdk_telemetry" });
     if (text.includes("NodeSDK") || text.includes("@opentelemetry/")) tsSignals.push({ file: relPath, signal: "otel_js" });
     if (relPath.endsWith("instrumentation.ts") || relPath.endsWith("instrumentation.js")) tsSignals.push({ file: relPath, signal: "next_instrumentation_hook" });
+  }
+  for (const path of tsFiles) {
+    const text = readText(path);
+    const relPath = rel(path, root);
     try {
       tsScans.set(relPath, scanJs(text));
     } catch {
@@ -302,17 +326,31 @@ export function scan(rootArg: string): Json {
     for (const [line, api] of result.llmCalls) tsOpenAICalls.push({ file, line, provider: "openai", api });
     for (const [line, name] of result.chatIds) tsChatIds.push({ file, line, name });
   }
-  report.llm_calls.push(...tsOpenAICalls);
-  report.chat_id_candidates.push(...tsChatIds);
-
   const worker = findWrangler(root);
   const nextProject = isNext(root);
-  if (worker) {
-    report.typescript.worker = { config: worker.file, main: worker.main, compatibility_flags: worker.flags, nodejs_als: worker.als };
+  const usesZoroval = "zoroval" in jsPackages || [...tsScans.values()].some((r) => r.imports.has("zoroval"));
+  const pythonCalls = (report.llm_calls as Json[]).length > 0;
+  const hasPythonService = (report.services as Json[]).some((s) => s.kind === "python");
+  const hasTsService = (report.services as Json[]).some((s) => s.kind === "typescript") || worker !== null;
+  const lang: Lang = pythonCalls && tsOpenAICalls.length ? "both"
+    : pythonCalls ? "python"
+    : tsOpenAICalls.length ? "typescript"
+    : hasPythonService && hasTsService ? "both"
+    : hasTsService ? "typescript" : "python";
+  const includeTs = lang !== "python";
+  const workerRelevant = includeTs && worker !== null && (tsOpenAICalls.length > 0 || usesZoroval);
+  // A Python-only project gets exactly what the Python CLI prints: no TypeScript scan results at all.
+  if (includeTs) {
+    report.llm_calls.push(...tsOpenAICalls);
+    report.chat_id_candidates.push(...tsChatIds);
+    if (worker) {
+      report.typescript.worker = { config: worker.file, main: worker.main, compatibility_flags: worker.flags, nodejs_als: worker.als };
+    }
+    if (nextProject) report.typescript.nextjs = true;
+    addTypescriptEntryPoints(report, tsScans, worker);
+    addFrameworkEntryPoints(report, tsScans); // last: nothing above depends on it
+    envFiles.push(...devVarsFiles);
   }
-  if (nextProject) report.typescript.nextjs = true;
-  addTypescriptEntryPoints(report, tsScans, worker);
-  addFrameworkEntryPoints(report, tsScans); // last: nothing above depends on it
 
   // servers and serverless
   const hintText = hintTexts.join("\n");
@@ -331,9 +369,9 @@ export function scan(rootArg: string): Json {
     const base = posix.basename(relPath);
     if (base.startsWith("serverless.") || base.startsWith("template.yaml") || base.startsWith("samconfig")) report.serverless.push({ kind: "serverless_config", file: relPath });
     if (base === "vercel.json" && pyFiles.length) report.serverless.push({ kind: "vercel_python", file: relPath });
-    else if (base === "vercel.json" && report.services.some((s: Json) => s.kind === "typescript")) report.serverless.push({ kind: "vercel", file: relPath });
+    else if (includeTs && base === "vercel.json" && report.services.some((s: Json) => s.kind === "typescript")) report.serverless.push({ kind: "vercel", file: relPath });
   }
-  if (worker) report.serverless.push({ kind: "cloudflare_worker", file: worker.file });
+  if (includeTs && worker) report.serverless.push({ kind: "cloudflare_worker", file: worker.file });
   const lowered = hintText.toLowerCase();
   report.secrets_managers = [...new Set(SECRETS_HINTS.filter((h) => lowered.includes(h)).map((h) => h.trim()))].sort();
 
@@ -361,15 +399,15 @@ export function scan(rootArg: string): Json {
   report.env = {
     [envfile.KEY_VAR]: keyState,
     env_files: envReport,
-    dotenv_loader: (report.tracing.code_signals ?? []).some((s: Json) => s.signal === "dotenv") || "python-dotenv" in pyPackages || "dotenv" in jsPackages || "dotenv-cli" in jsPackages,
+    dotenv_loader: (report.tracing.code_signals ?? []).some((s: Json) => s.signal === "dotenv") || "python-dotenv" in pyPackages || (includeTs && ("dotenv" in jsPackages || "dotenv-cli" in jsPackages)),
     vendor_vars: [...new Set([...namesInFiles, ...Object.keys(process.env)])]
       .filter((n) => ["LANGFUSE_", "LANGSMITH_", "LANGCHAIN_", "OTEL_EXPORTER_OTLP", "TRACELOOP_", "PHOENIX_", "ARIZE_"].some((p) => n.startsWith(p)))
       .sort(),
     repo_is_git: envfile.gitRoot(root) !== null,
   };
 
-  classify(report, pyPackages, jsPackages, imports, tsOpenAICalls.length > 0, worker, nextProject);
-  return report;
+  classify(report, pyPackages, jsPackages, imports, includeTs && tsOpenAICalls.length > 0, includeTs, lang, worker, workerRelevant, nextProject);
+  return { report, info: { lang, worker, workerRelevant, nextProject } };
 }
 
 function isSymlink(path: string): boolean {
@@ -417,14 +455,14 @@ function addFrameworkEntryPoints(report: Json, scans: Map<string, ReturnType<typ
 
 const has = (packages: Record<string, string>, ...names: string[]): boolean => names.some((n) => norm(n) in packages);
 
-function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsOpenAI: boolean, worker: Wrangler | null, nextProject: boolean): void {
+function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsOpenAI: boolean, includeTs: boolean, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean): void {
   const cases: (number | string)[] = [];
   const explain: (number | string)[] = [];
   const notes: string[] = report.notes;
   const tracing = report.tracing;
   const signals = new Set<string>((tracing.code_signals ?? []).map((s: Json) => String(s.signal).split(":")[0]));
 
-  const usesOpenai = has(py, "openai") || "openai" in imports || "openai" in js || tsOpenAI;
+  const usesOpenai = has(py, "openai") || "openai" in imports || (includeTs && "openai" in js) || tsOpenAI;
   const usesAnthropic = has(py, "anthropic") || "anthropic" in imports;
   tracing.openai = usesOpenai;
   tracing.anthropic = usesAnthropic;
@@ -476,22 +514,28 @@ function classify(report: Json, py: Record<string, string>, js: Record<string, s
   } else if (usesOpenai || usesAnthropic) {
     notes.push("No conversation id found. Ask whether this is a chat app and where its chat id lives.");
   }
-  if (worker && !worker.als) {
+  if (worker && workerRelevant && !worker.als) {
     notes.push(`${worker.file} has neither the nodejs_als nor the nodejs_compat compatibility flag: turns will not be grouped into conversations. Add nodejs_als to compatibility_flags.`);
   }
-  report.plan = makePlan(report, worker, nextProject, usesOpenai);
+  report.plan = makePlan(report, lang, worker, workerRelevant, nextProject, usesOpenai);
 }
 
 const isTsFile = (file: string): boolean => TS_EXT.some((ext) => file.endsWith(ext));
 
-function makePlan(report: Json, worker: Wrangler | null, nextProject: boolean, usesOpenai: boolean): string[] {
+function makePlan(report: Json, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean): string[] {
   const cases = report.cases as number[];
   const plan: string[] = [];
   const entryOf = (pred: (e: Json) => boolean) => (report.entry_points as Json[]).find(pred)?.file as string | undefined;
   const hasPython = (report.services as Json[]).some((s) => s.kind === "python");
-  const hasTypescript = (report.services as Json[]).some((s) => s.kind === "typescript") || worker !== null;
-  const tsOnly = hasTypescript && !hasPython;
+  const hasTypescript = lang !== "python";
+  const tsOnly = lang === "typescript";
 
+  if (lang === "both") {
+    const where = (pred: (f: string) => boolean) => (report.llm_calls as Json[]).find((c) => pred(c.file))?.file;
+    const py = where((f) => !isTsFile(f));
+    const ts = where(isTsFile);
+    plan.push(`Two languages in this repo${py && ts ? ` (Python: ${py}; TypeScript: ${ts})` : ""}: set each one up with its own SDK (\`pip install zoroval\` for Python, \`npm install zoroval\` for TypeScript).`);
+  }
   if (!tsOnly) {
     const entry = report.entry_points.length ? report.entry_points[0].file : null;
     if (hasPython) plan.push("Add `zoroval` to the Python dependencies.");
@@ -510,19 +554,19 @@ function makePlan(report: Json, worker: Wrangler | null, nextProject: boolean, u
       if (report.servers.gunicorn) plan.push("Pre-fork servers: nothing extra; the SDK restarts its export thread after fork.");
     }
   }
-  if (hasTypescript) plan.push(...typescriptPlan(report, worker, nextProject, usesOpenai, entryOf));
+  if (hasTypescript) plan.push(...typescriptPlan(report, worker, workerRelevant, nextProject, usesOpenai, entryOf));
   if (cases.includes(6)) {
     plan.push("TypeScript: register an OTLP exporter to the Zoroval endpoint with the key header; pass the chat id in experimental_telemetry metadata.");
   }
-  if (hasPython || !hasTypescript) {
+  if (lang !== "typescript") {
     plan.push("Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`.");
   } else {
     const file = worker ? ".dev.vars" : nextProject ? ".env.local" : ".env";
     plan.push(`Run \`npx zoroval login\` (writes the key to ${file}, which must be git-ignored), then \`npx zoroval doctor\`.`);
   }
-  if (report.deploy_files.length && !(hasTypescript && !hasPython)) {
+  if (report.deploy_files.length && lang !== "typescript") {
     plan.push("Production: make a deploy key in the app and set ZOROVAL_INGEST_KEY in the host's secret settings yourself; the skill writes nothing there.");
-  } else if (worker) {
+  } else if (worker && hasTypescript) {
     plan.push("Production: make a deploy key in the app and run `wrangler secret put ZOROVAL_INGEST_KEY` yourself; the skill writes nothing there.");
   } else if (hasTypescript && (nextProject || report.deploy_files.length)) {
     plan.push("Production: make a deploy key in the app and add ZOROVAL_INGEST_KEY to the host's environment variables (for Vercel, the project's settings) yourself; the skill writes nothing there.");
@@ -530,7 +574,7 @@ function makePlan(report: Json, worker: Wrangler | null, nextProject: boolean, u
   return plan;
 }
 
-function typescriptPlan(report: Json, worker: Wrangler | null, nextProject: boolean, usesOpenai: boolean, entryOf: (pred: (e: Json) => boolean) => string | undefined): string[] {
+function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, entryOf: (pred: (e: Json) => boolean) => string | undefined): string[] {
   const plan: string[] = [];
   const tsCalls = (report.llm_calls as Json[]).filter((c) => isTsFile(c.file));
   const entry = worker
@@ -554,7 +598,7 @@ function typescriptPlan(report: Json, worker: Wrangler | null, nextProject: bool
   }
   if (worker) {
     plan.push("Hand the flush to the platform: `ctx.waitUntil(zoroval.flush())` before the `fetch` handler returns.");
-    if (!worker.als) plan.push(`Add \`nodejs_als\` to compatibility_flags in ${worker.file}; without it turns are not grouped into conversations.`);
+    if (workerRelevant && !worker.als) plan.push(`Add \`nodejs_als\` to compatibility_flags in ${worker.file}; without it turns are not grouped into conversations.`);
   } else if (nextProject) {
     plan.push("Hand the flush to the platform: `after(() => zoroval.flush())` in Next.js 15 (or `waitUntil` from `@vercel/functions`) at the end of each route that calls the model.");
   } else {
