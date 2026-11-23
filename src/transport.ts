@@ -5,7 +5,7 @@
  *   attributes, then gzips the body with `CompressionStream` (sent as is when a runtime lacks it).
  * - One `X-Zoroval-Batch-Id` (UUIDv7) per batch, reused on its retries.
  * - `fetch` only: no Node APIs, so the same code runs on Node 18+, Workers and Edge. A redirect is
- *   never followed (the request carries the key).
+ *   never followed (the request carries the key): a 3xx answer counts as a refused batch.
  * - The request timeout grows with the body size, between `requestTimeoutMs` and a ceiling below
  *   the gateway's 60 s body-read deadline: 64 KiB/s is a slow uplink, so a 2G link gets time.
  * - Retries 429 and 503 after `Retry-After` (never sooner than the backoff), and 5xx, 408, timeouts
@@ -271,7 +271,7 @@ export class Transport {
         headers,
         body: body.bytes as unknown as BodyInit,
         signal: request.signal,
-        redirect: "error",
+        redirect: "manual", // never followed; workerd does not support "error"
       });
       const text = await response.text();
       return { status: response.status, headers: response.headers, text };

@@ -1,0 +1,39 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { test } from "node:test";
+import { KEY, startGateway } from "./gateway.mjs";
+
+function run(mode, url, onReady) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [new URL("./exit-child.mjs", import.meta.url).pathname, mode, url, KEY], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; if (out.includes("ready") && onReady) { onReady(child); onReady = null; } });
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+    setTimeout(() => child.kill("SIGKILL"), 15_000).unref();
+  });
+}
+
+test("a script that just ends sends its spans (beforeExit flush)", async () => {
+  const gateway = await startGateway();
+  const { code } = await run("natural", gateway.url);
+  assert.equal(code, 0);
+  assert.equal(gateway.spans().length, 1);
+  await gateway.close();
+});
+
+test("SIGTERM flushes, then the process still exits the way it would have", async () => {
+  const gateway = await startGateway();
+  const { signal } = await run("sigterm", gateway.url, (child) => setTimeout(() => child.kill("SIGTERM"), 100));
+  assert.equal(signal, "SIGTERM", "default SIGTERM behaviour is kept");
+  assert.equal(gateway.spans().length, 1);
+  await gateway.close();
+});
+
+test("SIGTERM with the app's own handler: flush, and the app decides when to exit", async () => {
+  const gateway = await startGateway();
+  const { code, signal } = await run("sigterm-app", gateway.url, (child) => setTimeout(() => child.kill("SIGTERM"), 100));
+  assert.equal(signal, null);
+  assert.equal(code, 0);
+  assert.equal(gateway.spans().length, 1);
+  await gateway.close();
+});

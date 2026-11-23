@@ -1,0 +1,44 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+const root = new URL("..", import.meta.url).pathname;
+const resolveWith = (conditions) =>
+  execFileSync(process.execPath, [...conditions.map((c) => `--conditions=${c}`), "--input-type=module", "-e", 'console.log(import.meta.resolve("zoroval"))'], { cwd: root, encoding: "utf8" }).trim();
+
+test("conditional exports pick one entry per runtime", () => {
+  assert.match(resolveWith([]), /dist\/node\.js$/);
+  assert.match(resolveWith(["workerd"]), /dist\/workerd\.js$/);
+  assert.match(resolveWith(["edge-light"]), /dist\/edge\.js$/);
+});
+
+test("the edge entries contain no Node-only import except node:async_hooks in the workerd one", () => {
+  for (const file of ["edge.js", "edge.cjs", "index.js", "index.cjs", "workerd.js", "workerd.cjs"]) {
+    const text = readFileSync(new URL(`../dist/${file}`, import.meta.url), "utf8");
+    const imports = text.match(/node:[a-z_/]+/g) ?? [];
+    const allowed = file.startsWith("workerd") ? ["node:async_hooks"] : [];
+    assert.deepEqual([...new Set(imports)], allowed, file);
+  }
+  const chunk = readFileSync(new URL("../dist/", import.meta.url).pathname + "/" + execFileSync("ls", ["dist"], { cwd: root, encoding: "utf8" }).split("\n").find((f) => f.startsWith("chunk-")), "utf8");
+  assert.deepEqual(chunk.match(/node:[a-z_/]+|require\(/g) ?? [], []);
+});
+
+test("package has zero runtime dependencies and the declared engines", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.dependencies, undefined);
+  assert.equal(pkg.engines.node, ">=18");
+});
+
+test("the CommonJS build works with require()", () => {
+  const out = execFileSync(process.execPath, ["-e", `
+    const z = require("zoroval");
+    (async () => {
+      const r = await z.conversation("c", () => z.turn(async () => 41 + 1));
+      console.log(JSON.stringify({ r, init: z.init(), keys: Object.keys(z).sort() }));
+    })();`], { cwd: root, encoding: "utf8", env: { ...process.env, ZOROVAL_INGEST_KEY: "" } });
+  const result = JSON.parse(out);
+  assert.equal(result.r, 42);
+  assert.equal(result.init, false);
+  assert.deepEqual(result.keys, ["Observation", "VERSION", "conversation", "currentObservation", "flush", "init", "setMetadata", "setTags", "setUser", "shutdown", "status", "step", "tool", "trace", "turn"]);
+});
