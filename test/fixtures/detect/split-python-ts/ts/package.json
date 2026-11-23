@@ -1,0 +1,6 @@
+{
+  "name": "chat-service",
+  "type": "module",
+  "scripts": { "chat": "tsx --env-file=.env src/chat.ts", "ask": "tsx --env-file=.env src/ask.ts", "test": "node --import tsx --test test/*.test.ts" },
+  "dependencies": { "openai": "^7.0.0" }
+}

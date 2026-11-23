@@ -1,0 +1,1 @@
+{ "name": "hono-worker", "dependencies": { "hono": "^4" } }

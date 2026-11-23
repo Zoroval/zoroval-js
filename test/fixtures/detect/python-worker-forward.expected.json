@@ -1,0 +1,124 @@
+{
+  "root": "<root>",
+  "services": [
+    {
+      "path": ".",
+      "kind": "typescript",
+      "manifest": "package.json"
+    }
+  ],
+  "packages": {
+    "python": {
+      "openai": ">=1.40",
+      "python-dotenv": "",
+      "slack-bolt": ">=1.18"
+    },
+    "typescript": {
+      "typescript": "5.9.3",
+      "wrangler": "4.0.0"
+    }
+  },
+  "imports": {
+    "dotenv": [
+      "main.py"
+    ],
+    "openai": [
+      "prompt.py"
+    ],
+    "prompt": [
+      "main.py"
+    ]
+  },
+  "llm_calls": [
+    {
+      "file": "prompt.py",
+      "line": 7,
+      "provider": "openai",
+      "api": "responses.parse"
+    }
+  ],
+  "tracing": {
+    "code_signals": [
+      {
+        "file": "main.py",
+        "line": 4,
+        "signal": "dotenv"
+      }
+    ],
+    "openai": true,
+    "anthropic": false,
+    "otel": {
+      "sdk": false,
+      "contrib_instrumentors": [],
+      "collector_configs": []
+    }
+  },
+  "entry_points": [
+    {
+      "file": "main.py",
+      "line": null,
+      "kind": "script"
+    }
+  ],
+  "chat_id_candidates": [
+    {
+      "file": "prompt.py",
+      "line": 6,
+      "name": "thread_id"
+    }
+  ],
+  "servers": {},
+  "serverless": [],
+  "env": {
+    "ZOROVAL_INGEST_KEY": "absent",
+    "env_files": [
+      {
+        "path": ".env",
+        "symlink": false,
+        "tracked": false,
+        "ignored": true,
+        "names": [
+          "OPENAI_API_KEY",
+          "LANGFUSE_HOST",
+          "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ]
+      },
+      {
+        "path": ".env.example",
+        "symlink": false,
+        "tracked": false,
+        "ignored": false,
+        "names": [
+          "OPENAI_API_KEY"
+        ]
+      }
+    ],
+    "dotenv_loader": true,
+    "vendor_vars": [
+      "LANGFUSE_HOST",
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ],
+    "repo_is_git": true
+  },
+  "deploy_files": [
+    "Dockerfile"
+  ],
+  "ci_files": [],
+  "collector_configs": [],
+  "secrets_managers": [],
+  "typescript": {
+    "signals": []
+  },
+  "cases": [
+    3,
+    9
+  ],
+  "explain_only": [],
+  "notes": [],
+  "plan": [
+    "Add `import zoroval` and `zoroval.init()` after the existing tracing setup (in main.py); it attaches to the existing provider.",
+    "Wrap each chat turn in `with zoroval.conversation(thread_id):` (candidate at prompt.py:6).",
+    "Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`.",
+    "Production: make a deploy key in the app and set ZOROVAL_INGEST_KEY in the host's secret settings yourself; the skill writes nothing there."
+  ]
+}

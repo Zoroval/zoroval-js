@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main] # a pull request is covered by pull_request; no second run per commit
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push cancels the run before it for the same branch or pull request.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The whole suite takes a few minutes; a hang ends here instead of after hours.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        timeout-minutes: 10
+      # Miniflare (the workerd runner) needs Node 22 or newer; the Node 18 and 20 jobs cover the Node entries.
+      - if: matrix.node == 22
+        run: npm run test:workerd
+        timeout-minutes: 5
+      # A real Next.js app (Node and Edge routes) using the packed package; installs Next, so it runs once.
+      - if: matrix.node == 22
+        run: npm run test:next
+        timeout-minutes: 12

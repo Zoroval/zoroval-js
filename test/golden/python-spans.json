@@ -1,0 +1,311 @@
+[
+ {
+  "name": "chat_tools",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"Be brief.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}],\"finish_reason\":\"tool_calls\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.choice.count": 1,
+    "gen_ai.request.max_tokens": 100,
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.presence_penalty": 0.25,
+    "gen_ai.request.seed": 7,
+    "gen_ai.request.stop_sequences": [
+     "END"
+    ],
+    "gen_ai.request.stream": false,
+    "gen_ai.request.temperature": 0.5,
+    "gen_ai.response.finish_reasons": [
+     "tool_calls"
+    ],
+    "gen_ai.response.id": "chatcmpl-test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.tool.definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}}]",
+    "gen_ai.usage.cache_read.input_tokens": 8,
+    "gen_ai.usage.input_tokens": 21,
+    "gen_ai.usage.output_tokens": 9,
+    "gen_ai.usage.reasoning.output_tokens": 3,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation",
+    "zoroval.tool_calls": "[{\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "chat_followup",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_abc123\",\"response\":\"22C\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"thanks\"}],\"name\":\"ines\"}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}],\"finish_reason\":\"tool_calls\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stop_sequences": [
+     "a",
+     "b"
+    ],
+    "gen_ai.request.stream": false,
+    "gen_ai.response.finish_reasons": [
+     "tool_calls"
+    ],
+    "gen_ai.response.id": "chatcmpl-test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.usage.cache_read.input_tokens": 8,
+    "gen_ai.usage.input_tokens": 21,
+    "gen_ai.usage.output_tokens": 9,
+    "gen_ai.usage.reasoning.output_tokens": 3,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation",
+    "zoroval.tool_calls": "[{\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "chat_stream_usage",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hello there\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"You said: hello there\"}],\"finish_reason\":\"stop\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": true,
+    "gen_ai.response.finish_reasons": [
+     "stop"
+    ],
+    "gen_ai.response.id": "chatcmpl-test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.response.time_to_first_chunk": 0.0029085410060361028,
+    "gen_ai.usage.cache_read.input_tokens": 8,
+    "gen_ai.usage.input_tokens": 21,
+    "gen_ai.usage.output_tokens": 9,
+    "gen_ai.usage.reasoning.output_tokens": 3,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "chat_stream_tools",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"weather?\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}],\"finish_reason\":\"tool_calls\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": true,
+    "gen_ai.response.finish_reasons": [
+     "tool_calls"
+    ],
+    "gen_ai.response.id": "chatcmpl-test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.response.time_to_first_chunk": 0.0013596250209957361,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation",
+    "zoroval.tool_calls": "[{\"id\":\"call_abc123\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "chat_media",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"look\"},{\"type\":\"image\",\"content\":\"[image omitted]\"},{\"type\":\"image\",\"content\":\"[image omitted]\",\"uri\":\"https://example.com/a.png\"},{\"type\":\"audio\",\"content\":\"[audio omitted]\"},{\"type\":\"file\",\"content\":\"[file omitted]\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"You said: hello\"}],\"finish_reason\":\"stop\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": false,
+    "gen_ai.response.finish_reasons": [
+     "stop"
+    ],
+    "gen_ai.response.id": "chatcmpl-test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.usage.cache_read.input_tokens": 8,
+    "gen_ai.usage.input_tokens": 21,
+    "gen_ai.usage.output_tokens": 9,
+    "gen_ai.usage.reasoning.output_tokens": 3,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "responses_tools",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather?\"}]}]",
+    "gen_ai.openai.previous_response_id": "resp_prev",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_resp1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}],\"finish_reason\":\"completed\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.max_tokens": 50,
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": false,
+    "gen_ai.response.finish_reasons": [
+     "completed"
+    ],
+    "gen_ai.response.id": "resp_test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.system_instructions": "[{\"type\":\"text\",\"content\":\"Be brief.\"}]",
+    "gen_ai.tool.definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"parameters\":{}}]",
+    "gen_ai.usage.cache_read.input_tokens": 4,
+    "gen_ai.usage.input_tokens": 12,
+    "gen_ai.usage.output_tokens": 7,
+    "gen_ai.usage.reasoning.output_tokens": 2,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation",
+    "zoroval.tool_calls": "[{\"id\":\"call_resp1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "responses_followup",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"weather?\"},{\"type\":\"image\",\"content\":\"[image omitted]\",\"uri\":\"https://example.com/b.png\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_resp1\",\"name\":\"get_weather\",\"arguments\":\"{}\"}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_resp1\",\"response\":\"22C\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Echo: [{\\\"role\\\":\\\"user\\\",\\\"content\\\":[{\\\"type\\\":\\\"inpu\"}],\"finish_reason\":\"completed\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": false,
+    "gen_ai.response.finish_reasons": [
+     "completed"
+    ],
+    "gen_ai.response.id": "resp_test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.usage.cache_read.input_tokens": 4,
+    "gen_ai.usage.input_tokens": 12,
+    "gen_ai.usage.output_tokens": 7,
+    "gen_ai.usage.reasoning.output_tokens": 2,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "responses_stream",
+  "span": {
+   "attributes": {
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hello\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Echo: hello\"}],\"finish_reason\":\"completed\"}]",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test",
+    "gen_ai.request.stream": true,
+    "gen_ai.response.finish_reasons": [
+     "completed"
+    ],
+    "gen_ai.response.id": "resp_test123",
+    "gen_ai.response.model": "gpt-test-2026-01-01",
+    "gen_ai.response.time_to_first_chunk": 0.055994833004660904,
+    "gen_ai.usage.cache_read.input_tokens": 4,
+    "gen_ai.usage.input_tokens": 12,
+    "gen_ai.usage.output_tokens": 7,
+    "gen_ai.usage.reasoning.output_tokens": 2,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation"
+   },
+   "events": [],
+   "kind": 3,
+   "name": "chat gpt-test",
+   "status": "UNSET",
+   "status_message": null
+  }
+ },
+ {
+  "name": "chat_429",
+  "span": {
+   "attributes": {
+    "error.type": "RateLimitError",
+    "gen_ai.conversation.id": "golden",
+    "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hi\"}]}]",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.provider.name": "openai",
+    "gen_ai.request.model": "gpt-test-429",
+    "gen_ai.request.stream": false,
+    "server.address": "127.0.0.1",
+    "server.port": 4599,
+    "zoroval.conversation.id": "golden",
+    "zoroval.observation.type": "generation"
+   },
+   "events": [
+    {
+     "attributes": [
+      "exception.escaped",
+      "exception.message",
+      "exception.stacktrace",
+      "exception.type"
+     ],
+     "name": "exception"
+    }
+   ],
+   "kind": 3,
+   "name": "chat gpt-test-429",
+   "status": "ERROR",
+   "status_message": "RateLimitError: Error code: 429 - Rate limit reached"
+  }
+ }
+]

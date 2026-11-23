@@ -1,0 +1,3 @@
+pytest ; python_version > "3.8"
+requests[security] >= 2.0  # inline
+git+https://example.com/x.git

@@ -1,0 +1,86 @@
+{
+  "name": "zoroval",
+  "version": "0.1.0",
+  "description": "Zoroval tracing for TypeScript and JavaScript LLM apps, grouped as whole conversations.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zoroval/zoroval-js.git"
+  },
+  "homepage": "https://zoroval.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/node.cjs",
+  "module": "./dist/node.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "zoroval": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "workerd": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/workerd.js",
+        "require": "./dist/workerd.cjs"
+      },
+      "edge-light": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/edge.js",
+        "require": "./dist/edge.cjs"
+      },
+      "node": {
+        "import": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/node.js"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/node.cjs"
+        }
+      },
+      "default": {
+        "import": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/index.js"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/index.cjs"
+        }
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup && tsup --config tsup.cli.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && tsup --config tsup.test.config.ts && node scripts/run-tests.mjs",
+    "test:workerd": "npm run build && node test/workerd/run.mjs",
+    "size": "npm run build && node scripts/size.mjs",
+    "test:next": "node test/nextjs/run.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "esbuild": "^0.28.2",
+    "miniflare": "^4.20260730.0",
+    "openai": "^7.62.0",
+    "openai-v5": "npm:openai@^5.23.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "openai": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "openai": {
+      "optional": true
+    }
+  }
+}

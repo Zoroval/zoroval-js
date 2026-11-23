@@ -1,0 +1,8 @@
+[[package]]
+name = "openai"
+version = "1.55.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "Langfuse"
+version = "2.60.1"

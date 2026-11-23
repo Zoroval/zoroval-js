@@ -1,0 +1,319 @@
+{
+  "root": "<root>",
+  "services": [
+    {
+      "path": ".",
+      "kind": "python",
+      "manifest": "pyproject.toml"
+    }
+  ],
+  "packages": {
+    "python": {
+      "edge": "",
+      "langchain": "^0.2",
+      "langfuse": "==2.60.1",
+      "langsmith": ">=0.1",
+      "openai": "==1.55.0",
+      "openinference-instrumentation-openai": "*",
+      "phoenix-otel": "",
+      "pytest": "^8",
+      "requests": ">=2",
+      "traceloop-sdk": "^0.30"
+    },
+    "typescript": {}
+  },
+  "imports": {
+    "__future__": [
+      "app.py"
+    ],
+    "a": [
+      "app.py"
+    ],
+    "anthropic": [
+      "pkg/other.py"
+    ],
+    "flask": [
+      "app.py"
+    ],
+    "langfuse": [
+      "app.py"
+    ],
+    "langfuse.decorators": [
+      "app.py"
+    ],
+    "langfuse.decorators.observe": [
+      "app.py"
+    ],
+    "langfuse.openai": [
+      "app.py"
+    ],
+    "openinference": [
+      "app.py"
+    ],
+    "opentelemetry": [
+      "app.py"
+    ],
+    "os": [
+      "app.py"
+    ],
+    "phoenix": [
+      "app.py"
+    ],
+    "rel": [
+      "app.py"
+    ],
+    "sys": [
+      "app.py"
+    ],
+    "traceloop": [
+      "app.py"
+    ]
+  },
+  "llm_calls": [
+    {
+      "file": "app.py",
+      "line": 35,
+      "provider": "openai",
+      "api": "chat.completions.create"
+    },
+    {
+      "file": "app.py",
+      "line": 42,
+      "provider": "openai",
+      "api": "responses.parse"
+    },
+    {
+      "file": "app.py",
+      "line": 52,
+      "provider": "openai",
+      "api": "responses.stream"
+    },
+    {
+      "file": "pkg/other.py",
+      "line": 4,
+      "provider": "anthropic",
+      "api": "messages.stream"
+    },
+    {
+      "file": "pkg/other.py",
+      "line": 5,
+      "provider": "anthropic",
+      "api": "messages.parse"
+    }
+  ],
+  "tracing": {
+    "code_signals": [
+      {
+        "file": "app.py",
+        "line": 19,
+        "signal": "instrumentor:OpenAIInstrumentor().instrument"
+      },
+      {
+        "file": "app.py",
+        "line": 20,
+        "signal": "traceloop_init"
+      },
+      {
+        "file": "app.py",
+        "line": 22,
+        "signal": "otel_provider"
+      },
+      {
+        "file": "app.py",
+        "line": 31,
+        "signal": "langfuse_observe"
+      }
+    ],
+    "openai": true,
+    "anthropic": true,
+    "langfuse": {
+      "spec": "==2.60.1",
+      "major": 2,
+      "otel_based": false,
+      "openai_wrapper": true
+    },
+    "otel": {
+      "sdk": false,
+      "contrib_instrumentors": [],
+      "collector_configs": []
+    },
+    "openinference": [
+      "openinference-instrumentation-openai"
+    ],
+    "openllmetry": [
+      "traceloop-sdk"
+    ],
+    "langsmith": true
+  },
+  "entry_points": [
+    {
+      "file": "app.py",
+      "line": 18,
+      "kind": "Flask"
+    },
+    {
+      "file": "app.py",
+      "line": 48,
+      "kind": "lambda_handler"
+    },
+    {
+      "file": "app.py",
+      "line": 56,
+      "kind": "lambda_handler"
+    },
+    {
+      "file": "pkg/other.py",
+      "line": null,
+      "kind": "script"
+    }
+  ],
+  "chat_id_candidates": [
+    {
+      "file": "app.py",
+      "line": 31,
+      "name": "chatId"
+    },
+    {
+      "file": "app.py",
+      "line": 31,
+      "name": "session_id"
+    },
+    {
+      "file": "app.py",
+      "line": 33,
+      "name": "conversationId"
+    },
+    {
+      "file": "app.py",
+      "line": 35,
+      "name": "thread_id"
+    },
+    {
+      "file": "app.py",
+      "line": 42,
+      "name": "room_id"
+    },
+    {
+      "file": "app.py",
+      "line": 43,
+      "name": "sessionId"
+    },
+    {
+      "file": "app.py",
+      "line": 43,
+      "name": "session_id"
+    },
+    {
+      "file": "app.py",
+      "line": 43,
+      "name": "chat_id"
+    },
+    {
+      "file": "app.py",
+      "line": 51,
+      "name": "threadId"
+    },
+    {
+      "file": "pkg/other.py",
+      "line": 5,
+      "name": "dialog_id"
+    }
+  ],
+  "servers": {
+    "gunicorn": {
+      "preload": true,
+      "workers": true
+    },
+    "uvicorn_workers": true
+  },
+  "serverless": [
+    {
+      "kind": "aws_lambda",
+      "file": "app.py"
+    },
+    {
+      "kind": "aws_lambda",
+      "file": "app.py"
+    },
+    {
+      "kind": "serverless_config",
+      "file": "serverless.yml"
+    }
+  ],
+  "env": {
+    "ZOROVAL_INGEST_KEY": "absent",
+    "env_files": [
+      {
+        "path": ".env",
+        "symlink": false,
+        "tracked": false,
+        "ignored": true,
+        "names": [
+          "OPENAI_API_KEY",
+          "LANGFUSE_HOST",
+          "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ]
+      },
+      {
+        "path": ".env.example",
+        "symlink": false,
+        "tracked": false,
+        "ignored": false,
+        "names": [
+          "OPENAI_API_KEY"
+        ]
+      }
+    ],
+    "dotenv_loader": false,
+    "vendor_vars": [
+      "LANGFUSE_HOST",
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ],
+    "repo_is_git": true
+  },
+  "deploy_files": [
+    "Procfile",
+    "serverless.yml",
+    "k8s/deploy.yaml"
+  ],
+  "ci_files": [
+    ".gitlab-ci.yml"
+  ],
+  "collector_configs": [],
+  "secrets_managers": [
+    "vault"
+  ],
+  "typescript": {
+    "signals": []
+  },
+  "cases": [
+    3,
+    4,
+    7,
+    9
+  ],
+  "explain_only": [
+    "2b",
+    5
+  ],
+  "notes": [
+    "Several possible conversation ids (chatId, chat_id, conversationId, dialog_id, room_id, sessionId, session_id, threadId, thread_id): ask the user which one."
+  ],
+  "plan": [
+    "Add `zoroval` to the Python dependencies.",
+    "Add `import zoroval` and `zoroval.init()` after the existing tracing setup (in app.py); it attaches to the existing provider.",
+    "Keep their instrumentor; do not add a second OpenAI wrapper (zoroval detects theirs).",
+    "Wrap each chat turn in `with zoroval.conversation(chatId):` (candidate at app.py:31).",
+    "Call `zoroval.flush()` at the end of each serverless handler.",
+    "Pre-fork servers: nothing extra; the SDK restarts its export thread after fork.",
+    "Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`.",
+    "Production: make a deploy key in the app and set ZOROVAL_INGEST_KEY in the host's secret settings yourself; the skill writes nothing there."
+  ],
+  "routes": [
+    {
+      "file": "app.py",
+      "line": 31,
+      "function": "handle"
+    }
+  ]
+}

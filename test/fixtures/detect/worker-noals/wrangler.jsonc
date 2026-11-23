@@ -1,0 +1,6 @@
+{
+  // a Worker without the flag
+  "name": "edge-worker-2",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+}
