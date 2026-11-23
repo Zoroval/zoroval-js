@@ -1,6 +1,7 @@
 // Manual 2G check of the CLI through the team's slowproxy (outside this repo). Not part of `npm test`.
 //   node test/cli-slowproxy.manual.mjs [path/to/slowproxy.mjs]
-// Profile: up 25 KB/s (about 200 kbit/s), down 50 KB/s, 300 ms one-way latency (slowproxy defaults).
+// Default profile: up 25 KB/s (about 200 kbit/s), down 50 KB/s, 300 ms one-way latency (slowproxy defaults).
+// Inesh's 2G bar: DOWN_KBPS=30 UP_KBPS=6 LATENCY_MS=400 node test/cli-slowproxy.manual.mjs
 // Runs `login` (setup code, approved) and `doctor` against fakes that sit behind the proxy.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -13,7 +14,7 @@ if (!existsSync(proxyPath)) { console.log("slowproxy not found at", proxyPath); 
 
 function proxy(upstream, port) {
   return spawn(process.execPath, [proxyPath], {
-    env: { ...process.env, LISTEN: String(port), UPSTREAM: upstream.replace("http://", ""), UP_KBPS: "25", DOWN_KBPS: "50", LATENCY_MS: "300", LOG: join(tmpdir(), "zoroval-cli-slowproxy.log") },
+    env: { ...process.env, LISTEN: String(port), UPSTREAM: upstream.replace("http://", ""), UP_KBPS: process.env.UP_KBPS ?? "25", DOWN_KBPS: process.env.DOWN_KBPS ?? "50", LATENCY_MS: process.env.LATENCY_MS ?? "300", LOG: join(tmpdir(), "zoroval-cli-slowproxy.log") },
     stdio: "ignore",
   });
 }

@@ -10,7 +10,7 @@ import { prepareFixture } from "./fixtures-prepare.mjs";
 
 const write = process.argv.includes("--write"); // refresh test/fixtures/detect/<name>.expected.json from the Python CLI
 const python = process.env.PYTHON ?? "python3";
-const pythonSrc = process.env.ZOROVAL_PYTHON_SRC ?? "/Users/inesh/Zoroval/zoroval-python/src";
+const pythonSrc = process.env.ZOROVAL_PYTHON_SRC ?? new URL("../../zoroval-python/src", import.meta.url).pathname;
 const cli = new URL("../dist/cli.js", import.meta.url).pathname;
 const base = new URL("./fixtures/detect/", import.meta.url).pathname;
 const args = process.argv.slice(2).filter((a) => a !== "--write");
