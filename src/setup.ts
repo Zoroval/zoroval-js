@@ -18,9 +18,10 @@
 import { resolve, keyIdOf, ingestUrlOk } from "./config.js";
 import type { InitOptions } from "./config.js";
 import { PENDING } from "./context.js";
+import type { RequestScope } from "./context.js";
 import { Processor } from "./processor.js";
 import { RUNTIME } from "./runtime.js";
-import { getState, setState } from "./state.js";
+import { getState, setDeclined, setState } from "./state.js";
 import { Transport } from "./transport.js";
 import { COUNTERS, internalError, logOnce, resetCounters, resetLogOnce } from "./util.js";
 
@@ -85,12 +86,12 @@ export function init(options: InitOptions = {}): boolean {
     if (getState()) return true; // the first good configuration stays
     const { cfg, unknown } = resolve({ ...options });
     if (unknown.length) logOnce("unknown-options", `zoroval: init() ignored unknown options: ${unknown.join(", ")}.`);
-    if (!cfg.enabled || !cfg.apiKey) return false;
+    if (!cfg.enabled || !cfg.apiKey) return declined();
     if (keyIdOf(cfg.apiKey) === null) {
       logOnce("bad-key", "zoroval: the ingest key does not look like a Zoroval ingest key (zv_ingest_...). Tracing is off.");
-      return false;
+      return declined();
     }
-    if (!ingestUrlOk(cfg.ingestUrl)) return false;
+    if (!ingestUrlOk(cfg.ingestUrl)) return declined();
     const transport = new Transport(cfg);
     setState({ cfg, transport, processor: new Processor(cfg, transport) });
     installProcessHooks();
@@ -101,12 +102,23 @@ export function init(options: InitOptions = {}): boolean {
   }
 }
 
+/** Tracing stays off: from now on `wrapFetch()` and `wrapOpenAI()` hand back what they were given. */
+function declined(): false {
+  setDeclined();
+  return false;
+}
+
 /** Send everything queued so far. Returns a promise that never rejects; true when all was sent. */
-export async function flush(timeoutMs?: number): Promise<boolean> {
+export function flush(timeoutMs?: number): Promise<boolean> {
+  return flushFor(null, timeoutMs);
+}
+
+/** `flush()` that first waits for the open work of one request (`withZoroval`), or all open work (null). */
+export async function flushFor(scope: RequestScope | null, timeoutMs?: number): Promise<boolean> {
   try {
     const state = getState();
     if (!state) return true;
-    return await state.processor.flush(timeoutMs ?? (RUNTIME.background ? 5000 : 25_000));
+    return await state.processor.flush(timeoutMs ?? (RUNTIME.background ? 5000 : 25_000), scope ? () => scope.open : undefined);
   } catch (error) {
     internalError("flush", error);
     return false;
@@ -116,6 +128,7 @@ export async function flush(timeoutMs?: number): Promise<boolean> {
 /** Flush and stop. Resolves with status() and never rejects. */
 export async function shutdown(timeoutMs?: number): Promise<Record<string, unknown>> {
   const state = getState();
+  setDeclined(false);
   if (!state) return status();
   try {
     await state.processor.shutdown(timeoutMs ?? state.cfg.shutdownTimeoutMs);

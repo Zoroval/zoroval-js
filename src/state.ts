@@ -11,6 +11,7 @@ export interface State {
 }
 
 let current: State | null = null;
+let declined = false;
 
 export function getState(): State | null {
   return current;
@@ -18,4 +19,14 @@ export function getState(): State | null {
 
 export function setState(state: State | null): void {
   current = state;
+  if (state) declined = false;
+}
+
+/** init() ran and tracing stayed off (no key, `enabled: false`, a bad key or URL). */
+export function tracingOff(): boolean {
+  return current === null && declined;
+}
+
+export function setDeclined(value = true): void {
+  if (!current) declined = value;
 }

@@ -85,7 +85,7 @@ For an OpenAI-compatible endpoint, list its base URL: `zoroval.wrapFetch(fetch, 
 
 ## Cloudflare Workers
 
-Wrap your exported handler. `withZoroval()` reads `ZOROVAL_INGEST_KEY` (and the other `ZOROVAL_*` settings) from your
+Wrap your exported handler object or `WorkerEntrypoint` class. `withZoroval()` reads `ZOROVAL_INGEST_KEY` (and the other `ZOROVAL_*` settings) from your
 Worker's bindings and sends the trace after the response, including streamed responses.
 
 ```ts

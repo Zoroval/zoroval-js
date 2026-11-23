@@ -10,10 +10,13 @@
  *
  * Deviations from `_processor.py`: there is no thread. Node runs one drain loop that a one-shot
  * `unref` timer starts `flushIntervalMs` after the first queued span. On Workers and Edge nothing
- * is sent unless `flush()` is called (the platform's `waitUntil` keeps it alive); there `flush()`
- * has a hard deadline and what is not sent by then is counted as failed, not retried forever.
- * `flush()` first waits, bounded, for turns still open, so a streamed reply that ends after the
- * response is returned is still sent. No GenAI-span filter, scrubbing of foreign spans, or fork
+ * is sent unless `flush()` is called (the platform's `waitUntil` keeps it alive), and each flush
+ * sends inside the request that called it: its own loop, its own abort signal, only the spans
+ * queued before it, and nothing shared with another request's I/O (Workers refuse that). There
+ * `flush()` has a hard deadline and what it had to send but could not is counted as failed, not
+ * retried forever. `flush()` first waits, bounded, for turns still open, so a streamed reply that
+ * ends after the response is returned is still sent (on Workers most of the flush time, since the
+ * request lives only as long as `waitUntil`). No GenAI-span filter, scrubbing of foreign spans, or fork
  * handling: every span is the SDK's own and a JavaScript process has no fork. Sampling uses the
  * same SHA-256 rule as Python, compared as a double instead of an exact 64-bit integer.
  */
@@ -27,7 +30,9 @@ import { WIRE_MARGIN, Transport } from "./transport.js";
 import { addCount, guard, internalError, logOnce, sha256, sleep, uuid7 } from "./util.js";
 
 const BATCH_BUDGET_MS = 30_000; // retries for one batch; grows to 1.5 request timeouts for big bodies
-const MAX_OPEN_WAIT_MS = 10_000; // longest a flush waits for open turns
+const MAX_OPEN_WAIT_MS = 10_000; // longest a Node flush waits for open turns
+const SEND_RESERVE_MS = 5_000; // on Workers and Edge, the part of a flush kept for sending after open turns end
+const POLL_MS = 25; // Workers and Edge poll instead of waking across requests
 const MAX_REQUEUES = 10; // a failing batch goes back to the queue at most this many times
 const MIN_BATCH_BYTES = 64 * 1024; // timeouts halve the batch size down to this
 const GROW_AFTER_OK = 4; // sends in a row before a halved batch size doubles again
@@ -49,6 +54,7 @@ export function sampleKey(conversationId: string | null, traceId: string): strin
 interface Item {
   span: Span;
   size: number;
+  seq: number; // order queued: a Workers flush sends only what was queued before it
 }
 
 /**
@@ -128,9 +134,9 @@ export class Processor {
       return;
     }
     const size = estimateSize(span);
-    this.queue.push({ span, size });
-    this.queueBytes += size;
     this.enqueued += 1;
+    this.queue.push({ span, size, seq: this.enqueued });
+    this.queueBytes += size;
     const dropped = this.dropOldest();
     addCount("spansQueued");
     this.reportDropped(dropped);
@@ -223,11 +229,9 @@ export class Processor {
     this.timer = null;
   }
 
-  /** The time after which a send must give up: the latest flush deadline, or the shutdown one. */
+  /** The time after which a background send must give up: none, until shutdown sets one. */
   private hardDeadline(): number {
-    if (this.stopping) return this.shutdownDeadline;
-    if (RUNTIME.background || !this.flushes.length) return Infinity;
-    return Math.max(...this.flushes);
+    return this.stopping ? this.shutdownDeadline : Infinity;
   }
 
   private kick(): void {
@@ -241,22 +245,25 @@ export class Processor {
       });
   }
 
-  private takeBatch(): Batch | null {
-    if (this.retry.length) {
-      const batch = this.retry.shift()!;
-      this.retrySpans -= batch.items.length;
-      this.queueBytes -= batch.size;
-      return batch;
+  /** The next batch to send; `upTo` limits it to spans queued at or before that sequence number. */
+  private takeBatch(deadline: number, upTo = Infinity): Batch | null {
+    const retryAt = this.retry.findIndex((batch) => batch.items.some((item) => item.seq <= upTo));
+    if (retryAt >= 0) {
+      const [batch] = this.retry.splice(retryAt, 1);
+      this.retrySpans -= batch!.items.length;
+      this.queueBytes -= batch!.size;
+      return batch!;
     }
     // A tool run still waiting to be linked to its streamed tool call stays queued until its grace
     // (a fraction of a second) ends, a flush too: only a deadline that is about to pass sends it as it is.
     const now = nowMs();
-    const releaseAll = this.hardDeadline() - now < 500;
+    const releaseAll = deadline - now < 500;
     this.heldUntil = 0;
     const taken: number[] = [];
     let size = 0;
     for (let at = 0; at < this.queue.length && taken.length < this.cfg.maxBatchSpans; at++) {
       const item = this.queue[at]!;
+      if (item.seq > upTo) break;
       if (!releaseAll && item.span.holdUntil > now) {
         this.heldUntil = this.heldUntil ? Math.min(this.heldUntil, item.span.holdUntil) : item.span.holdUntil;
         continue;
@@ -289,7 +296,7 @@ export class Processor {
         await sleep(held, this.transport.signal);
         continue;
       }
-      const batch = this.takeBatch();
+      const batch = this.takeBatch(deadline);
       if (!batch) {
         // only held spans are left: a flush or shutdown waits out the grace, the background timer comes back by itself
         if (this.queue.length && (this.flushes.length || this.stopping)) {
@@ -298,17 +305,22 @@ export class Processor {
         }
         return;
       }
-      const size = batch.items.length;
-      let putBack = 0;
-      try {
-        putBack = await this.exportBatch(batch);
-      } catch (error) {
-        internalError("export", error);
-        addCount("spansFailed", size);
-      }
-      this.completed += size - putBack;
+      await this.sendBatch(batch, deadline, this.transport.signal);
       this.notify();
     }
+  }
+
+  /** Export one batch and count it as done, except the spans that went back to the queue. */
+  private async sendBatch(batch: Batch, deadline: number, signal: AbortSignal): Promise<void> {
+    const size = batch.items.length;
+    let putBack = 0;
+    try {
+      putBack = await this.exportBatch(batch, deadline, signal);
+    } catch (error) {
+      internalError("export", error);
+      addCount("spansFailed", size);
+    }
+    this.completed += size - putBack;
   }
 
   private shrink(size: number): void {
@@ -331,7 +343,7 @@ export class Processor {
   }
 
   /** Send one batch. Returns how many of its spans went back to the queue. */
-  private async exportBatch(batch: Batch): Promise<number> {
+  private async exportBatch(batch: Batch, hardDeadline: number, signal: AbortSignal): Promise<number> {
     const count = batch.items.length;
     if (!this.cfg.apiKey || this.transport.fatalReason) {
       addCount("spansFailed", count);
@@ -351,9 +363,9 @@ export class Processor {
     }
     const timeout = this.transport.requestTimeoutFor(body.bytes.length);
     const budget = Math.max(BATCH_BUDGET_MS, 1.5 * timeout);
-    const deadline = Math.min(nowMs() + budget, this.hardDeadline());
+    const deadline = Math.min(nowMs() + budget, hardDeadline);
     const result = await this.transport.send(tracesUrl(this.cfg), body, {
-      deadline, batchId: batch.batchId, timeout, splitOnTimeout: count > 1,
+      deadline, batchId: batch.batchId, timeout, splitOnTimeout: count > 1, signal,
     });
     if (result.ok) {
       this.sentOk();
@@ -379,7 +391,7 @@ export class Processor {
       return 0;
     }
     if (result.paused) return this.putBack(batch); // the gateway asked for a pause: not this batch's fault
-    if (result.retryable && (this.stopping || nowMs() >= this.hardDeadline())) {
+    if (result.retryable && (this.stopping || nowMs() >= hardDeadline)) {
       // The deadline cut the retries short; what is left is counted when the flush or shutdown ends.
       if (result.reason !== "shutdown" && result.reason !== "deadline") this.transport.backOff(result.reason);
       return this.putBack(batch);
@@ -400,25 +412,26 @@ export class Processor {
 
   // ------------------------------------------------------------------ flush and shutdown
 
-  /** Wait until every span queued before this call is sent or given up. Never throws. */
-  async flush(timeoutMs: number): Promise<boolean> {
+  /**
+   * Wait until every span queued before this call is sent or given up. Never throws. `openWork`
+   * counts the turns and generations to wait for first (default: all of them in this process).
+   */
+  async flush(timeoutMs: number, openWork: () => number = () => this.openRoots): Promise<boolean> {
     if (this.stopped) return true;
+    if (!RUNTIME.background) return this.flushHere(timeoutMs, openWork);
     const deadline = nowMs() + Math.max(timeoutMs, 0);
     this.flushes.push(deadline);
     try {
       // Turns still open get up to half the time (and no more than 10 s), so a streamed reply that ends
       // later is still sent, while a turn that never ends cannot hold every later flush.
       const until = nowMs() + Math.min(Math.max(timeoutMs, 0) / 2, MAX_OPEN_WAIT_MS);
-      while (this.openRoots > 0 && nowMs() < until) await this.waitForChange(until - nowMs());
+      while (openWork() > 0 && nowMs() < until) await this.waitForChange(until - nowMs());
       const target = this.enqueued;
       if (this.completed >= target) return true;
       this.kick();
       while (this.completed < target) {
         const remaining = deadline - nowMs();
-        if (remaining <= 0) {
-          await this.giveUp(deadline);
-          return false;
-        }
+        if (remaining <= 0) return false;
         await this.waitForChange(Math.min(remaining, 250));
       }
       return true;
@@ -428,6 +441,75 @@ export class Processor {
     } finally {
       this.flushes.splice(this.flushes.indexOf(deadline), 1);
     }
+  }
+
+  /**
+   * Workers and Edge: send what was queued before this call, inside the calling request. Nothing here
+   * waits on, wakes, or aborts work that belongs to another request: the platform may cancel that
+   * request at any time, and Workers refuse I/O objects shared across requests.
+   */
+  private async flushHere(timeoutMs: number, openWork: () => number): Promise<boolean> {
+    const total = Math.max(timeoutMs, 0);
+    const deadline = nowMs() + total;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    this.flushes.push(deadline);
+    try {
+      // Open turns and streams get all but the send reserve: the request lives only as long as this flush.
+      const until = deadline - Math.min(SEND_RESERVE_MS, total / 2);
+      while (openWork() > 0 && nowMs() < until) await sleep(Math.min(POLL_MS, until - nowMs()), signal);
+      const target = this.enqueued;
+      for (;;) {
+        if (this.stopped) return true;
+        if (nowMs() >= deadline - 50) break;
+        const held = this.transport.holdRemaining();
+        if (held > 0) {
+          if (nowMs() + held >= deadline) break;
+          await sleep(held, signal);
+          continue;
+        }
+        const batch = this.takeBatch(deadline, target);
+        if (batch) {
+          await this.sendBatch(batch, deadline, signal);
+          continue;
+        }
+        // Only spans still held for a moment are left (a tool run waiting for its tool call): wait them out.
+        if (this.heldUntil) {
+          await sleep(Math.max(this.heldUntil - nowMs(), 5), signal);
+          continue;
+        }
+        return true; // everything queued before this flush is sent, or is in another flush's hands
+      }
+      this.dropUpTo(target);
+      return false;
+    } catch (error) {
+      internalError("flush", error);
+      return false;
+    } finally {
+      this.flushes.splice(this.flushes.indexOf(deadline), 1);
+      controller.abort();
+    }
+  }
+
+  /** A Workers or Edge flush ran out of time: what it had to send and could not is counted as failed. */
+  private dropUpTo(target: number): void {
+    let left = 0;
+    const keep = (item: Item) => {
+      if (item.seq > target) return true;
+      left += 1;
+      this.queueBytes -= item.size;
+      return false;
+    };
+    this.queue = this.queue.filter(keep);
+    for (const batch of this.retry) {
+      const before = batch.items.length;
+      batch.items = batch.items.filter(keep);
+      this.retrySpans -= before - batch.items.length;
+      batch.size = batch.items.reduce((sum, item) => sum + item.size, 0);
+    }
+    this.retry = this.retry.filter((batch) => batch.items.length);
+    this.completed += left;
+    if (left) addCount("spansFailed", left);
   }
 
   /**
@@ -443,17 +525,8 @@ export class Processor {
     }
   }
 
-  /**
-   * A flush ran out of time. On Workers and Edge, if no other flush is still waiting, stop the send
-   * and count what is left as failed: nothing runs after the platform's deadline anyway.
-   */
-  private async giveUp(deadline: number): Promise<void> {
-    if (RUNTIME.background || this.flushes.some((other) => other > deadline)) return;
-    await this.abandon();
-  }
-
   private async abandon(): Promise<void> {
-    this.transport.abortInflight();
+    if (RUNTIME.background) this.transport.abortInflight(); // on Workers each flush aborts its own sends
     if (this.draining) await Promise.race([this.draining, sleep(200)]);
     const left = this.pendingSpans();
     this.queue = [];

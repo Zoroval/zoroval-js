@@ -15,7 +15,7 @@ const problems = [];
 
 function runFile(file) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["--test", new URL(file, dir).pathname], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--test", "--test-reporter=tap", new URL(file, dir).pathname], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));

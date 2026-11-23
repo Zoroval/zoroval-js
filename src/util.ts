@@ -203,3 +203,11 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+/** On each `wrapFetch()` wrapper: the plain `fetch` under it. */
+export const FETCH_INNER = Symbol.for("zoroval.fetch.inner");
+
+/** `fn` without our wrapper around it: the SDK never sends its own requests through `wrapFetch()`. */
+export function untracedFetch(fn: typeof fetch): typeof fetch {
+  return (fn as unknown as Record<symbol, typeof fetch | undefined>)?.[FETCH_INNER] ?? fn;
+}

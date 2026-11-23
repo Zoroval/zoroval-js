@@ -20,7 +20,7 @@
 
 import { currentConversationId, noteResponseChain } from "../context.js";
 import { toPlain } from "../json.js";
-import { getState } from "../state.js";
+import { getState, tracingOff } from "../state.js";
 import type { AttrValue } from "../span.js";
 import { internalError } from "../util.js";
 import { Generation, get, given, mediaPart, safe, textPart, watchIterator } from "./common.js";
@@ -453,6 +453,7 @@ function wrapMethod(owner: Json, method: string, api: Api, client: Json): void {
  *     const openai = zoroval.wrapOpenAI(new OpenAI());
  */
 export function wrapOpenAI<T extends object>(client: T): T {
+  if (tracingOff()) return client; // init() left tracing off: the client is not touched
   try {
     const c = client as Json;
     for (const method of ["create", "parse"]) {

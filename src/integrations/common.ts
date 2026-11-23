@@ -21,10 +21,10 @@
  */
 
 import {
-  addTruncated, contentAllowed, recordError, registerToolCalls, setContent, startGeneration,
+  REDACTED, addTruncated, contentAllowed, recordError, registerToolCalls, setContent, startGeneration,
 } from "../context.js";
 import type { GenerationHandle } from "../context.js";
-import { dumps, fit } from "../json.js";
+import { applyRedact, dumps, fit } from "../json.js";
 import { nowMs } from "../runtime.js";
 import { getState } from "../state.js";
 import type { AttrValue } from "../span.js";
@@ -125,13 +125,22 @@ export class Generation {
       if (fields.outputMessages?.length) setContent(handle.obs, "gen_ai.output.messages", fields.outputMessages);
       const calls = fields.toolCalls ?? [];
       if (calls.length) {
+        // Arguments are content: they go through `redact` like every other content field, and are
+        // dropped when it throws.
         const withArgs = contentAllowed(handle.obs);
-        const listed = calls.map((c) => ({
-          id: c.id ?? null,
-          name: c.name ?? null,
-          ...(withArgs && given(c.arguments) ? { arguments: c.arguments } : {}),
-        }));
-        const [text, cut] = fit(dumps(listed), getState()?.cfg.maxContentBytes ?? 1 << 20);
+        const cfg = getState()?.cfg;
+        let redacted = false;
+        const listed = calls.map((c) => {
+          const call: Record<string, unknown> = { id: c.id ?? null, name: c.name ?? null };
+          if (withArgs && given(c.arguments)) {
+            const [args, changed, ok] = applyRedact(cfg?.redact ?? null, c.arguments);
+            redacted = redacted || changed;
+            if (ok) call.arguments = args;
+          }
+          return call;
+        });
+        if (redacted) span.setAttribute(REDACTED, true);
+        const [text, cut] = fit(dumps(listed), cfg?.maxContentBytes ?? 1 << 20);
         span.setAttribute("zoroval.tool_calls", text);
         if (cut) addTruncated(span, cut);
         registerToolCalls(handle.obs, calls.map((c) => ({ id: c.id as string, name: c.name as string, arguments: c.arguments })));

@@ -158,3 +158,64 @@ async function runWorker(flags, gatewayUrl, paths) {
     await gateway.close();
   }
 }
+
+// 5. Overlapping requests on one isolate: each flush sends inside its own request, so a request that
+//    starts while another one's flush is sending is still sent, and so is every later one.
+{
+  const gateway = await startGateway(() => ({ delayMs: 60 }));
+  const mf = new Miniflare({
+    modules: [{ type: "ESModule", path: "worker.mjs", contents: await bundle(["workerd", "worker", "browser"]) }],
+    compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_als"],
+    bindings: { ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url },
+  });
+  const chats = () => new Set(gateway.spans().filter((s) => s.attrs["zoroval.observation.type"] === "turn").map((s) => s.attrs["zoroval.conversation.id"]));
+  const until = async (ok, ms) => { for (let t = 0; t < ms && !ok(); t += 50) await new Promise((r) => setTimeout(r, 50)); };
+  try {
+    const a = mf.dispatchFetch("http://worker.test/?chat=A").then((r) => r.text());
+    await new Promise((r) => setTimeout(r, 20));
+    const b = mf.dispatchFetch("http://worker.test/?chat=B").then((r) => r.text());
+    await Promise.all([a, b]);
+    await until(() => chats().has("A") && chats().has("B"), 5000);
+    await (await mf.dispatchFetch("http://worker.test/?chat=C")).text();
+    await until(() => chats().has("C"), 5000);
+    await new Promise((r) => setTimeout(r, 2000));
+    await (await mf.dispatchFetch("http://worker.test/?chat=D")).text();
+    await until(() => chats().has("D"), 5000);
+    assert.deepEqual([...chats()].sort(), ["A", "B", "C", "D"], "every request's turn reached the gateway");
+    const { status } = await (await mf.dispatchFetch("http://worker.test/?chat=E&noflush=1")).json();
+    assert.equal(status.internalErrors, 0, "no cross-request I/O error");
+    assert.equal(status.spansFailed, 0);
+    console.log(`ok - workerd overlapping requests: A, B (20 ms apart), C and D all sent (${gateway.requests.length} request(s)), no internal errors`);
+  } finally {
+    await mf.dispose();
+    await gateway.close();
+  }
+}
+
+// 6. A streamed reply longer than 10 s: withZoroval keeps the request alive until the stream ends,
+//    and the generation span is sent with the whole answer.
+{
+  const gateway = await startGateway();
+  const fake = await startFakeOpenAI({ chunkDelayMs: 30 }); // gpt-test-big streams for about 12 s
+  const mf = new Miniflare({
+    modules: [{ type: "ESModule", path: "worker.mjs", contents: await bundle(["workerd", "worker", "browser"], "openai-worker.mjs") }],
+    compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_als"],
+    bindings: { ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url, OPENAI_BASE: fake.url },
+  });
+  try {
+    const started = Date.now();
+    const response = await mf.dispatchFetch("http://worker.test/?chat=L&stream=1&model=gpt-test-big");
+    assert.match(await response.text(), /\[DONE\]/);
+    const streamedMs = Date.now() - started;
+    assert.ok(streamedMs > 10_000, `the stream took ${streamedMs} ms`);
+    const generation = () => gateway.spans().find((s) => s.attrs["zoroval.observation.type"] === "generation");
+    for (let i = 0; i < 100 && !generation(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(generation(), "the generation span of a 12 s stream reached the gateway");
+    assert.equal(generation().attrs["gen_ai.response.finish_reasons"][0], "stop");
+    console.log(`ok - workerd stream of ${(streamedMs / 1000).toFixed(1)} s: generation span sent after the stream ended`);
+  } finally {
+    await mf.dispose();
+    await fake.close();
+    await gateway.close();
+  }
+}

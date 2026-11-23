@@ -116,6 +116,26 @@ function currentStore(): Store {
   return getAls()?.getStore() ?? EMPTY;
 }
 
+/** The turns and generations still open in one Worker request (`withZoroval`), so its flush waits for its own. */
+export interface RequestScope {
+  open: number;
+}
+
+let scopeAls: AlsLike<RequestScope> | null | undefined;
+
+function getScopeAls(): AlsLike<RequestScope> | null {
+  if (scopeAls === undefined) scopeAls = RUNTIME.als ? new RUNTIME.als<RequestScope>() : null;
+  return scopeAls;
+}
+
+/** Run `fn` as one request. Null scope when the runtime cannot carry it: flush then waits for all open work. */
+export function inRequestScope<T>(fn: () => T): { scope: RequestScope | null; result: T } {
+  const scoped = getScopeAls();
+  if (!scoped) return { scope: null, result: fn() };
+  const scope: RequestScope = { open: 0 };
+  return { scope, result: scoped.run(scope, fn) };
+}
+
 function noAlsNotice(): void {
   logOnce(
     "no-als",
@@ -499,7 +519,7 @@ function startSpan(spec: SpanSpec): Started | null {
   } else if (spec.captureInput !== false && spec.input !== undefined && spec.input !== null) {
     setContent(obs, INPUT, spec.input);
   }
-  const release = isRoot ? holdRoot(state.processor) : undefined;
+  const release = isRoot ? holdOpen(state.processor, OPEN_ROOT_MS) : undefined;
   return { obs, span, claim, release, store: { conversation: scope, root: isRoot ? obs : store.root, span, test: store.test } };
 }
 
@@ -547,16 +567,17 @@ function runSpan<T>(spec: SpanSpec, fn: (obs: Observation) => T): T {
     throw error;
   }
   if (isThenable(result)) {
-    return result.then(
-      (value) => {
-        finishSpan(active, null, false);
-        return value;
-      },
-      (error) => {
-        finishSpan(active, error, true);
-        throw error;
-      },
-    ) as T;
+    // The app gets its own promise back (an SDK's promise subclass keeps its methods); the span ends
+    // on the side. That side never rethrows: the app handles its own rejection, or Node reports it once.
+    try {
+      result.then(
+        () => finishSpan(active, null, false),
+        (error) => finishSpan(active, error, true),
+      );
+    } catch (error) {
+      finishSpan(active, error, true);
+    }
+    return result;
   }
   finishSpan(active, null, false);
   return result;
@@ -569,18 +590,22 @@ const OPEN_GENERATION_MS = 300_000;
 const OPEN_ROOT_MS = 60_000;
 
 /**
- * A turn or trace is open until it ends; `flush()` waits (a little) for open ones. A turn that never
- * settles must not be waited for ever, so the count is released by a timer too. Returns the release.
+ * A turn, trace or generation is open until it ends; `flush()` waits (bounded) for open ones, and a
+ * `withZoroval` flush for those of its own request. Work that never ends must not be waited for
+ * ever, so the count is released by a timer too. Returns the release.
  */
-function holdRoot(processor: Processor): () => void {
+function holdOpen(processor: Processor, maxMs: number): () => void {
   processor.rootStarted();
+  const scope = getScopeAls()?.getStore();
+  if (scope) scope.open += 1;
   let open = true;
-  const timer = setTimeout(() => release(), OPEN_ROOT_MS);
+  const timer = setTimeout(() => release(), maxMs);
   (timer as { unref?: () => void }).unref?.();
   const release = () => {
     if (!open) return;
     open = false;
     clearTimeout(timer);
+    if (scope) scope.open = Math.max(0, scope.open - 1);
     guard("rootEnded", () => processor.rootEnded(), undefined);
   };
   return release;
@@ -616,16 +641,7 @@ export function startGeneration(
   const span = new Span(name, KIND_CLIENT, parent, attrs);
   const obs = new Observation(span, "generation", false, store.conversation?.id ?? null);
   const processor = state.processor;
-  processor.rootStarted();
-  let open = true;
-  const release = () => {
-    if (!open) return;
-    open = false;
-    clearTimeout(timer);
-    guard("rootEnded", () => processor.rootEnded(), undefined);
-  };
-  const timer = setTimeout(release, OPEN_GENERATION_MS);
-  (timer as { unref?: () => void }).unref?.();
+  const release = holdOpen(processor, OPEN_GENERATION_MS);
   const inner: Store = { ...store, span };
   const scoped = getAls();
   return {

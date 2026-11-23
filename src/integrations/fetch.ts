@@ -17,8 +17,8 @@
  */
 
 import { toPlain } from "../json.js";
-import { getState } from "../state.js";
-import { internalError } from "../util.js";
+import { getState, tracingOff } from "../state.js";
+import { FETCH_INNER, internalError, untracedFetch } from "../util.js";
 import { Generation, get } from "./common.js";
 import type { Json } from "./common.js";
 import { finishResult, startCall, streamState } from "./openai.js";
@@ -178,17 +178,24 @@ function observeResponse(response: Response, gen: Generation, api: Api, signal?:
  *
  *     const tracedFetch = zoroval.wrapFetch();
  *     const reply = await tracedFetch("https://api.openai.com/v1/chat/completions", { method: "POST", ... });
+ *
+ * With no argument it wraps the global `fetch` as it is now, so `globalThis.fetch = zoroval.wrapFetch()`
+ * works. After init() has left tracing off, it returns the `fetch` it was given.
  */
 export function wrapFetch(fetchFn?: FetchFn, options: WrapFetchOptions = {}): FetchFn {
-  const base: FetchFn = fetchFn ? (input, init) => fetchFn.call(globalThis, input, init) : (input, init) => globalThis.fetch(input, init);
+  const inner = fetchFn ?? globalThis.fetch;
+  if (tracingOff() || typeof inner !== "function") return inner;
+  const base: FetchFn = (input, init) => inner.call(globalThis, input, init);
   const bases = parseBases(options);
-  return function zorovalFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const zorovalFetch = function zorovalFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (!getState() || methodOf(input, init) !== "POST") return base(input, init);
     const url = requestUrl(input);
     const hit = url && match(url, bases);
     if (!hit) return base(input, init);
     return traced(base, hit, input, init);
   };
+  Object.defineProperty(zorovalFetch, FETCH_INNER, { value: untracedFetch(inner) });
+  return zorovalFetch;
 }
 
 async function traced(base: FetchFn, hit: Match, input: RequestInfo | URL, init: RequestInit | undefined): Promise<Response> {

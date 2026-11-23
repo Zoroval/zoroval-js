@@ -26,7 +26,7 @@ import type { Config } from "./config.js";
 import { nowMs } from "./runtime.js";
 import { toNanos } from "./span.js";
 import type { AttrValue, Span } from "./span.js";
-import { addCount, logOnce, sleep, uuid7 } from "./util.js";
+import { addCount, logOnce, sleep, untracedFetch, uuid7 } from "./util.js";
 
 export const USER_AGENT = `${SDK_NAME}/${VERSION}`;
 const FATAL_STATUS = new Set([401, 403]);
@@ -119,7 +119,11 @@ export class Transport {
 
   constructor(private cfg: Config) {}
 
-  /** Aborted by `abortInflight()` (shutdown, or a flush that ran out of time) to stop sends and sleeps at once. */
+  /**
+   * Aborted by `abortInflight()` (Node shutdown, or an exit flush that ran out of time) to stop sends and
+   * sleeps at once. Workers and Edge pass each flush's own signal instead: an AbortController made in one
+   * request must not cancel I/O in another.
+   */
   get signal(): AbortSignal {
     return this.controller.signal;
   }
@@ -252,7 +256,7 @@ export class Transport {
   // ------------------------------------------------------------------ sending
 
   /** One POST. Throws `RequestTimeout` when `timeoutMs` passes and `Aborted` on `abortInflight()`. */
-  private async postOnce(url: string, body: Compressed, headers: Record<string, string>, timeoutMs: number) {
+  private async postOnce(url: string, body: Compressed, headers: Record<string, string>, timeoutMs: number, shared: AbortSignal) {
     if (typeof fetch !== "function") throw new Error("no fetch");
     const request = new AbortController();
     let timedOut = false;
@@ -260,11 +264,10 @@ export class Transport {
       timedOut = true;
       request.abort();
     }, timeoutMs);
-    const shared = this.signal;
     const onAbort = () => request.abort();
     shared.addEventListener("abort", onAbort, { once: true });
     try {
-      const response = await fetch(url, {
+      const response = await untracedFetch(fetch).call(globalThis, url, {
         method: "POST",
         headers,
         body: body.bytes as unknown as BodyInit,
@@ -292,8 +295,9 @@ export class Transport {
   async send(
     url: string,
     body: Compressed,
-    options: { deadline: number; batchId?: string; timeout?: number; splitOnTimeout?: boolean },
+    options: { deadline: number; batchId?: string; timeout?: number; splitOnTimeout?: boolean; signal?: AbortSignal },
   ): Promise<SendResult> {
+    const signal = options.signal ?? this.signal;
     if (this.fatalReason) return result({ reason: this.fatalReason, fatal: true });
     const batchId = options.batchId ?? uuid7();
     this.lastBatchId = batchId;
@@ -304,7 +308,7 @@ export class Transport {
       const held = this.holdRemaining();
       if (held > 0) {
         if (nowMs() + held >= deadline) return result({ reason: this.holdReason || "paused", retryable: true, paused: true });
-        if (await sleep(held, this.signal)) return result({ reason: "shutdown", retryable: true });
+        if (await sleep(held, signal)) return result({ reason: "shutdown", retryable: true });
       }
       attempt += 1;
       const remaining = deadline - nowMs();
@@ -327,7 +331,7 @@ export class Transport {
       // An attempt cut short by the deadline proves nothing about the uplink: no split.
       const cutShort = remaining < perRequest;
       try {
-        const response = await this.postOnce(url, body, headers, Math.min(perRequest, remaining));
+        const response = await this.postOnce(url, body, headers, Math.min(perRequest, remaining), signal);
         status = response.status;
         text = response.text;
         if (status < 200 || status >= 300) {
@@ -385,7 +389,7 @@ export class Transport {
       }
       const delay = Transport.backoff(attempt);
       if (nowMs() + delay >= deadline) return result({ status, reason: reason || "deadline", retryable: true });
-      if (await sleep(delay, this.signal)) return result({ status, reason: "shutdown", retryable: true });
+      if (await sleep(delay, signal)) return result({ status, reason: "shutdown", retryable: true });
     }
   }
 }
