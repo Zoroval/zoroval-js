@@ -88,6 +88,8 @@ export async function startGateway(options = {}) {
   const o = { key: KEY, batchStatus: "done", groupTurns: true, since: {}, firstTrace: null, project: "proj_1", ...options };
   const requests = [];
   const batches = new Map();
+  const received = []; // what POST /v1/traces took: counted by "since" like the real gateway does (test turns too)
+  const created = Date.now();
   const { url, close } = await listen(async (req, res) => {
     const path = req.url.split("?")[0];
     const query = new URL(req.url, "http://x").searchParams;
@@ -114,14 +116,21 @@ export async function startGateway(options = {}) {
       const conversations = new Set(record.spans.map((s) => s.attrs["zoroval.conversation.id"]));
       const traceIds = o.groupTurns ? [...conversations].map((c) => `trace-${c}`) : [...new Set(record.spans.map((s) => s.traceId))];
       batches.set(batchId, { turns, traceIds, spans: record.spans.length });
+      received.push({ at: Date.now(), turns, traces: traceIds.length });
       if (o.tracesStatus) return send(o.tracesStatus, { code: 2, message: o.tracesMessage ?? "failed" });
       return send(200, {});
     }
     if (path === "/v1/ingest/status") {
       if (o.statusCode) return send(o.statusCode, { message: o.statusMessage ?? "unavailable" });
+      const sinceAt = new Date(query.get("since") ?? 0).getTime() || 0;
+      const mine = received.filter((r) => r.at >= sinceAt);
+      const app = o.app && Date.now() - created >= (o.app.afterMs ?? 0) ? o.app : null; // traffic from the app itself
       const body = {
         project_id: "p1", project_key: o.project, first_trace_received_at: o.firstTrace, last_trace_received_at: o.firstTrace,
-        since: { turns: 0, traces: 0, ungrouped_turns: 0, dropped_spans_reported: 0, errors: [], ...o.since },
+        since: {
+          turns: mine.reduce((n, r) => n + r.turns, 0) + (app?.turns ?? 0), traces: mine.reduce((n, r) => n + r.traces, 0) + (app?.traces ?? 0),
+          ungrouped_turns: app?.ungrouped ?? 0, dropped_spans_reported: 0, errors: app?.errors ?? [], ...o.since,
+        },
       };
       const ref = query.get("batch_id");
       if (ref) {

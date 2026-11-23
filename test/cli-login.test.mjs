@@ -374,6 +374,16 @@ test("a Python app behind a forwarding Worker keeps its key in .env, with the Py
   await app.close();
 });
 
+test("a Python app next to a forwarding Worker and a TypeScript service keeps its key in .env", async () => {
+  const app = await manualApp();
+  const dir = prepareFixture(new URL("./fixtures/detect/split-python-ts", import.meta.url).pathname, { env: {} });
+  const r = await login(app, dir, ["--no-browser"]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.match(r.stdout, /Key written to \.env as/);
+  assert.equal(existsSync(join(dir, ".dev.vars")), false);
+  await app.close();
+});
+
 test("a Worker with its own model call and a Python app: the Worker's .dev.vars is the default", async () => {
   const app = await manualApp();
   const dir = prepareFixture(new URL("./fixtures/detect/mixed-worker", import.meta.url).pathname, { env: {} });

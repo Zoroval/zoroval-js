@@ -1,0 +1,1 @@
+{ "name": "forwarder", "scripts": { "dry-run": "wrangler deploy --dry-run" }, "devDependencies": { "wrangler": "4.0.0" } }

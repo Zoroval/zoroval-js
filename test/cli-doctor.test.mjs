@@ -17,7 +17,7 @@ test("doctor passes: checks in order, text lines, exit 0, key never shown", asyn
   const lines = r.stdout.trimEnd().split("\n");
   assert.equal(lines[0], "[ok  ] sdk: zoroval 0.1.0");
   assert.deepEqual(lines.slice(1).map((l) => l.split(":")[0]), [
-    "[ok  ] key", "[ok  ] gateway", "[ok  ] test trace", "[ok  ] test trace processed", "[ok  ] grouping", "[ok  ] first trace received", "Doctor",
+    "[ok  ] key", "[ok  ] gateway", "[ok  ] test trace", "[ok  ] test trace processed", "[ok  ] grouping", "[ok  ] first trace received", "[warn] traces this run", "Doctor",
   ]);
   assert.equal(lines[1], "[ok  ] key: found in environment, key id abcdefghijkl");
   assert.equal(lines[2], `[ok  ] gateway: ${gw.url} accepts the key; project proj_1`);
@@ -25,7 +25,8 @@ test("doctor passes: checks in order, text lines, exit 0, key never shown", asyn
   assert.equal(lines[4], "[ok  ] test trace processed: batch done, 4 spans");
   assert.equal(lines[5], "[ok  ] grouping: 2 test turns with one conversation id became 1 trace");
   assert.equal(lines[6], "[ok  ] first trace received: app traces are arriving (first at 2026-11-23T10:00:00Z)");
-  assert.equal(lines[7], "Doctor: all required checks passed.");
+  assert.match(lines[7], /^\[warn\] traces this run: no app traces since this run started\./);
+  assert.equal(lines[8], "Doctor: all required checks passed.");
   assert.ok(!r.stdout.includes(KEY) && !r.stderr.includes(KEY));
   await gw.close();
 });
@@ -219,7 +220,7 @@ test("--no-test-trace sends nothing and only reads status", async () => {
   const r = await doctor(gw, makeProject(), ["--no-test-trace", "--json"]);
   assert.equal(r.code, 0);
   assert.equal(gw.posts().length, 0);
-  assert.deepEqual(levels(r), ["pass:sdk", "pass:key", "pass:gateway", "pass:first trace received"]);
+  assert.deepEqual(levels(r), ["pass:sdk", "pass:key", "pass:gateway", "pass:first trace received", "warn:traces this run"]);
   await gw.close();
 });
 
@@ -227,11 +228,11 @@ test("no app traces yet: WARN, exit 0; with --wait it waits and then FAILs", asy
   const gw = await startGateway();
   let r = await doctor(gw, makeProject(), ["--no-test-trace", "--json"]);
   assert.equal(r.code, 0);
-  assert.deepEqual(json(r).checks.at(-1), { level: "warn", check: "first trace received", detail: "no app traces yet. Run your app once, then `npx zoroval doctor --wait 60`." });
+  assert.deepEqual(json(r).checks.find((c) => c.check === "first trace received"), { level: "warn", check: "first trace received", detail: "no app traces yet. Run your app once, then `npx zoroval doctor --wait 60`." });
   const started = Date.now();
   r = await doctor(gw, makeProject(), ["--no-test-trace", "--wait", "2", "--json"]);
   assert.equal(r.code, 1);
-  assert.equal(json(r).checks.at(-1).level, "fail");
+  assert.equal(json(r).checks.find((c) => c.check === "first trace received").level, "fail");
   assert.ok(Date.now() - started >= 1900);
   await gw.close();
 });
@@ -241,7 +242,8 @@ test("ungrouped turns, dropped spans and ingest errors are warnings", async () =
   const r = await doctor(gw, makeProject(), ["--no-test-trace", "--json"]);
   assert.equal(r.code, 0);
   const warns = json(r).checks.filter((c) => c.level === "warn");
-  assert.deepEqual(warns.map((w) => w.check), ["grouping (app)", "dropped spans", "ingest errors"]);
+  assert.deepEqual(warns.map((w) => w.check), ["traces this run", "grouping (app)", "dropped spans", "ingest errors"]);
+  warns.shift();
   assert.match(warns[0].detail, /^7 turns in the last 24 h arrived ungrouped\. Wrap chat handlers in zoroval\.conversation\(chatId, \.\.\.\) so one chat is one trace\.$/);
   assert.equal(warns[1].detail, "the SDK reported 3 dropped spans in the last 24 h (queue full or failed sends).");
   assert.equal(warns[2].detail, "span_too_large: 2");
@@ -324,4 +326,62 @@ test("a Worker that only forwards to a container (the model is called from Pytho
 test("a Worker that uses zoroval is checked even before its first model call", async () => {
   const warn = await workerChecks({ "src/index.ts": 'import * as zoroval from "zoroval";\nexport default { fetch() { zoroval.init(); } };', "wrangler.toml": 'name = "w"\n' }, true);
   assert.match(warn.detail, /^wrangler\.toml has neither/);
+});
+
+// ------------------------------------------------------------------ "traces this run"
+
+const line = (r) => json(r).checks.find((c) => c.check === "traces this run");
+
+test("traces this run: the doctor's own test turns are not counted as the app's", async () => {
+  const gw = await startGateway({ firstTrace: "2026-11-18T10:00:00Z" }); // an old first trace on a shared key
+  const r = await doctor(gw, makeProject(), ["--json"]);
+  assert.equal(r.code, 0);
+  assert.equal(line(r).level, "warn");
+  assert.equal(line(r).detail, "no app traces since this run started. Run your app, then `npx zoroval doctor --wait 60`.");
+  // it comes right after "first trace received"
+  const names = json(r).checks.map((c) => c.check);
+  assert.equal(names[names.indexOf("first trace received") + 1], "traces this run");
+  await gw.close();
+});
+
+test("traces this run: turns and traces from the app are counted, ungrouped and errors are shown", async () => {
+  const gw = await startGateway({ firstTrace: "2026-11-18T10:00:00Z", app: { turns: 3, traces: 2, ungrouped: 1, errors: [{ reason_code: "span_too_large", count: 2 }] } });
+  const r = await doctor(gw, makeProject(), ["--json"]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(line(r), { level: "warn", check: "traces this run", detail: "3 turns in 2 traces arrived from the app since this run started (1 ungrouped; errors span_too_large: 2)" });
+  await gw.close();
+});
+
+test("traces this run: a clean run passes, in text and JSON", async () => {
+  const gw = await startGateway({ firstTrace: "2026-11-18T10:00:00Z", app: { turns: 1, traces: 1 } });
+  const r = await doctor(gw, makeProject(), ["--json"]);
+  assert.deepEqual(line(r), { level: "pass", check: "traces this run", detail: "1 turn in 1 trace arrived from the app since this run started" });
+  await gw.close();
+  const again = await startGateway({ firstTrace: "2026-11-18T10:00:00Z", app: { turns: 1, traces: 1 } }); // a fresh one: the first run's test turns are not "this run"
+  const text = await doctor(again, makeProject());
+  assert.match(text.stdout, /\[ok {2}\] traces this run: 1 turn in 1 trace arrived/);
+  await again.close();
+});
+
+test("--wait: traffic that arrives during the window is picked up; none gives a warning that names the window", async () => {
+  const late = await startGateway({ firstTrace: "2026-11-18T10:00:00Z", app: { turns: 2, traces: 1, afterMs: 2500 } });
+  let r = await doctor(late, makeProject(), ["--no-test-trace", "--wait", "10", "--json"]);
+  assert.equal(line(r).level, "pass");
+  assert.match(line(r).detail, /^2 turns in 1 trace arrived/);
+  await late.close();
+  const none = await startGateway({ firstTrace: "2026-11-18T10:00:00Z" });
+  const started = Date.now();
+  r = await doctor(none, makeProject(), ["--no-test-trace", "--wait", "2", "--json"]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(line(r), { level: "warn", check: "traces this run", detail: "no new app traces in the last 2 s. Send a chat message to the app while doctor waits." });
+  assert.ok(Date.now() - started >= 1900);
+  await none.close();
+});
+
+test("a forwarding Worker next to a TypeScript service gets no Worker warning", async () => {
+  const gw = await startGateway({ firstTrace: "2026-11-23T10:00:00Z" });
+  const dir = prepareFixture(join(new URL("./fixtures/detect/", import.meta.url).pathname, "split-python-ts"));
+  const r = await doctor(gw, dir, ["--no-test-trace", "--json"]);
+  assert.equal(json(r).checks.find((c) => c.check === "worker context"), undefined);
+  await gw.close();
 });

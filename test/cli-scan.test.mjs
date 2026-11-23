@@ -97,7 +97,7 @@ test("JS: conversation ids as parameters, properties and destructured fields, no
   assert.deepEqual(ids("interface R { chatId?: string; dialog_id: number }"), ["1:chatId", "1:dialog_id"]);
   assert.deepEqual(ids("function g({ chatId }: { chatId: string }) {}"), ["1:chatId"]); // one per line and name
   // plain uses are not candidates
-  assert.deepEqual(ids("const x = chatId + 1; log(chatId); if (chatId) { go(); } for (const chatId of all) {}"), []);
+  assert.deepEqual(ids("const x = chatId + 1; log(chatId); if (chatId) { go(); }"), []);
   assert.deepEqual(ids("save(chatId, x);"), []);
 });
 
@@ -187,4 +187,19 @@ test("JS: web servers need the import and the call that creates the app", () => 
   assert.deepEqual(kinds('import { Hono } from "hono";\nconst a = new Hono();'), ["hono:2"]);
   assert.deepEqual(kinds('import Fastify from "fastify";\nconst f = Fastify({});'), ["fastify:2"]);
   assert.deepEqual(kinds('import { Hono } from "hono"; const a = new Hono(); const b = new Hono();'), ["hono:1"]); // first only
+});
+
+test("JS: a chat id declared or assigned is a candidate; comparisons and other names are not", () => {
+  assert.deepEqual(ids("const chatId = make();"), ["1:chatId"]);
+  assert.deepEqual(ids("let threadId;\nvar sessionId = 1;"), ["1:threadId", "2:sessionId"]);
+  assert.deepEqual(ids("let id;\nchatId = next();"), ["2:chatId"]);
+  assert.deepEqual(ids("if (chatId == 1 || chatId === 2) {}"), []);
+  assert.deepEqual(ids("const chatIdPrefix = 'x'; x.chatId2 = 1;"), []);
+});
+
+test("JS: a program for the terminal is one that reads readline or process.argv", () => {
+  assert.equal(cli.scanJs('import { createInterface } from "node:readline/promises";').cliMain, true);
+  assert.equal(cli.scanJs('const rl = require("readline");').cliMain, true);
+  assert.equal(cli.scanJs("const [, , q] = process.argv;").cliMain, true);
+  assert.equal(cli.scanJs("export const x = process.env.A;").cliMain, false);
 });

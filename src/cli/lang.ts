@@ -6,7 +6,7 @@
 
 import { analyze } from "./detect.js";
 import type { Lang } from "./detect.js";
-import { defaultEnvFile, projectKind } from "./project.js";
+import { isNext } from "./project.js";
 import type { Wrangler } from "./project.js";
 
 export type Kind = "python" | "worker" | "next" | "node";
@@ -22,7 +22,10 @@ export interface Project {
 export function projectInfo(root: string): Project {
   const { info } = analyze(root);
   if (info.lang === "python") return { lang: info.lang, kind: "python", envFile: ".env", worker: info.worker, workerRelevant: false };
-  return { lang: info.lang, kind: projectKind(root), envFile: defaultEnvFile(root), worker: info.worker, workerRelevant: info.workerRelevant };
+  // A Worker that only forwards requests (it calls no model) does not decide where the key goes.
+  const kind: Kind = info.workerRelevant ? "worker" : isNext(root) ? "next" : "node";
+  const envFile = kind === "worker" ? ".dev.vars" : kind === "next" ? ".env.local" : ".env";
+  return { lang: info.lang, kind, envFile, worker: info.worker, workerRelevant: info.workerRelevant };
 }
 
 /** Env files `doctor` looks in when `--env-file` is not given: the project's own first. */

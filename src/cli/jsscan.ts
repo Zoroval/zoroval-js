@@ -157,6 +157,8 @@ export interface JsScan {
   workerLine: number | null;
   /** Line of the first exported HTTP handler (`export async function POST`) or default export, if any. */
   handlerLine: number | null;
+  /** A command-line program: reads a terminal (`readline`) or `process.argv`. */
+  cliMain: boolean;
   /** Web servers created in the file (first of each kind): Express, Hono, Fastify. */
   frameworks: { kind: string; line: number }[];
 }
@@ -188,7 +190,7 @@ export function scanJs(source: string): JsScan {
   const nm = (i: number, v?: string) => i >= 0 && i < n && toks[i]!.k === "name" && (v === undefined || toks[i]!.v === v);
   const dot = (i: number) => op(i, ".", "?.");
 
-  const result: JsScan = { llmCalls: [], chatIds: [], imports: new Set(), workerLine: null, handlerLine: null, frameworks: [] };
+  const result: JsScan = { llmCalls: [], chatIds: [], imports: new Set(), workerLine: null, handlerLine: null, cliMain: false, frameworks: [] };
 
   /** First token of the member chain that ends at token `i` (`a.b().c.d`). */
   const chainStart = (i: number): number => {
@@ -284,6 +286,8 @@ export function scanJs(source: string): JsScan {
       const next = i + 1;
       let candidate = false;
       if (dot(prev)) candidate = true; // request.chatId, body?.chatId
+      else if (nm(prev, "const") || nm(prev, "let") || nm(prev, "var")) candidate = true; // const chatId = ...
+      else if (op(next, "=") && !op(next + 1, "=") && !op(prev, ".", "?")) candidate = true; // chatId = ...
       else if ((op(next, ":") || (op(next, "?") && op(next + 1, ":"))) && !op(prev, "?") && !nm(prev, "case")) {
         candidate = true; // { chatId: x }, (chatId: string), (chatId?: string), an interface member after `;` or a line end
       } else if (op(prev, "{", ",", "(")) {
@@ -302,6 +306,8 @@ export function scanJs(source: string): JsScan {
       if (candidate) result.chatIds.push([t.line, t.v]);
     }
   }
+  result.cliMain = [...result.imports].some((m) => /^(node:)?readline(\/promises)?$/.test(m)) ||
+    toks.some((t, i) => t.k === "name" && t.v === "process" && dot(i + 1) && nm(i + 2, "argv"));
   // Web servers come last: an import of the package plus the call that creates the app.
   const imported = (...names: string[]) => [...result.imports].some((m) => names.some((n) => m === n || m.startsWith(n + "/")));
   const found = (kind: string, line: number) => {

@@ -128,7 +128,7 @@ test("Worker without the flag: reported, noted, and the plan adds the flag", () 
   assert.ok(out.notes.some((n) => /^wrangler\.jsonc has neither the nodejs_als nor the nodejs_compat/.test(n)));
   assert.ok(out.plan.includes("Add `nodejs_als` to compatibility_flags in wrangler.jsonc; without it turns are not grouped into conversations."));
   assert.deepEqual(out.llm_calls, [{ file: "src/index.ts", line: 5, provider: "openai", api: "fetch" }]); // the URL is held in a variable
-  assert.deepEqual(out.chat_id_candidates, []);
+  assert.deepEqual(out.chat_id_candidates, [{ file: "src/index.ts", line: 4, name: "conversationId" }]); // a `const` counts
 });
 
 test("nodejs_compat counts as the flag", () => {
@@ -215,9 +215,9 @@ test("a Python repo with a TypeScript front end gets both, Python plan first", (
   const out = JSON.parse(detect(dir, "--json").stdout);
   assert.deepEqual(out.services.map((s) => `${s.kind}:${s.path}`), ["python:.", "typescript:web"]);
   assert.ok(out.llm_calls.some((c) => c.file === "chat.py") && out.llm_calls.some((c) => c.file === "web/app/api/chat/route.ts"));
-  assert.match(out.plan[0], /^Two languages in this repo \(Python: chat\.py; TypeScript: web\/app\/api\/chat\/route\.ts\)/);
+  assert.match(out.plan[0], /^Two languages in this repo \(Python: chat\.py in the repo root; TypeScript: web\/app\/api\/chat\/route\.ts in web\)/);
   assert.equal(out.plan[1], "Add `zoroval` to the Python dependencies.");
-  assert.ok(out.plan.includes("Install the package: `npm install zoroval` (or the project's package manager)."));
+  assert.ok(out.plan.includes("Install the package in `web`: `npm install zoroval` (or the project's package manager)."));
   assert.equal(out.plan.filter((s) => s.startsWith("Run `")).length, 1);
 });
 
@@ -271,9 +271,9 @@ test("a Worker with its own model call is a TypeScript project, noted when it la
 
 test("a repo with a model call in Python and one in a Worker names both SDKs", () => {
   const { out } = report("mixed-worker", WORKER_ENV);
-  assert.equal(out.plan[0], "Two languages in this repo (Python: app/prompt.py; TypeScript: worker/index.ts): set each one up with its own SDK (`pip install zoroval` for Python, `npm install zoroval` for TypeScript).");
+  assert.equal(out.plan[0], "Two languages in this repo (Python: app/prompt.py in the repo root; TypeScript: worker/index.ts in worker): set each one up with its own SDK (`pip install zoroval` for Python, `npm install zoroval` for TypeScript).");
   assert.ok(out.plan.includes("Add `zoroval` to the Python dependencies."));
-  assert.ok(out.plan.includes("Install the package: `npm install zoroval` (or the project's package manager)."));
+  assert.ok(out.plan.includes("Install the package in `worker`: `npm install zoroval` (or the project's package manager)."));
   assert.ok(out.notes.some((n) => /^wrangler\.toml has neither the nodejs_als/.test(n)));
   assert.deepEqual(out.llm_calls.map((c) => c.file), ["app/prompt.py", "worker/index.ts"]);
 });
@@ -285,4 +285,65 @@ test("no model call anywhere: the plan follows the manifests", () => {
   assert.ok(out.plan[0].startsWith("Two languages in this repo:"));
   const pyOnly = JSON.parse(detect(makeProject({ files: { "requirements.txt": "flask\n" } }), "--json").stdout);
   assert.equal(pyOnly.plan[0], "Add `zoroval` to the Python dependencies.");
+});
+
+// ------------------------------------------------------------------ services: the model call decides, per package
+
+test("a Python app, a forwarding Worker and a TypeScript chat service: two services, a plan for each, nothing for the Worker", () => {
+  const { out } = report("split-python-ts", { ".env": `OPENAI_API_KEY=${FAKE_SECRET}\n` });
+  assert.deepEqual(out.services, [
+    { path: ".", kind: "python", manifest: "requirements.txt" },
+    { path: "ts", kind: "typescript", manifest: "ts/package.json" },
+  ]);
+  assert.deepEqual(out.llm_calls.map((c) => `${c.file}:${c.line}`), ["prompt.py:7", "ts/src/operation.ts:6"]);
+  // nothing for the Worker: no entry point, no Worker block, no serverless entry, no note, no plan step
+  assert.ok(!out.entry_points.some((e) => e.kind === "worker" || e.file === "src/index.ts"));
+  assert.equal(out.typescript.worker, undefined);
+  assert.deepEqual(out.serverless, []);
+  assert.ok(out.notes.every((n) => !/nodejs_als|compatibility|wrangler/i.test(n)));
+  assert.ok(out.plan.every((s) => !/wrangler|nodejs_als|waitUntil|Worker/.test(s)), out.plan.join("\n"));
+  // Python plan, then the TypeScript plan for the `ts` service
+  assert.match(out.plan[0], /^Two languages in this repo \(Python: prompt\.py in the repo root; TypeScript: ts\/src\/operation\.ts in ts\)/);
+  assert.ok(out.plan.includes("Add `zoroval` to the Python dependencies."));
+  assert.ok(out.plan.includes("Install the package in `ts`: `npm install zoroval` (or the project's package manager)."));
+  assert.ok(out.plan.includes("Wrap each chat turn in `zoroval.conversation(chatId, () => zoroval.turn({ input }, async (turn) => { ... }))` (candidate at ts/src/app.ts:3)."));
+  assert.ok(out.plan.some((s) => s.includes("(for example in ts/src/")));
+});
+
+test("TypeScript chat ids: const, let and assignments count, plain comparisons do not", () => {
+  const { out } = report("split-python-ts", { ".env": "A=1\n" });
+  const ts = out.chat_id_candidates.filter((c) => c.file.startsWith("ts/")).map((c) => `${c.file}:${c.line}:${c.name}`);
+  assert.deepEqual(ts, ["ts/src/app.ts:3:chatId", "ts/src/chat.ts:5:chatId"]);
+});
+
+test("terminal programs are entry points: package.json scripts and bin, readline and argv mains; tests are not", () => {
+  const { out } = report("split-python-ts", { ".env": "A=1\n" });
+  assert.deepEqual(out.entry_points.filter((e) => e.file.endsWith(".ts")), [
+    { file: "ts/src/ask.ts", line: null, kind: "script" },
+    { file: "ts/src/chat.ts", line: null, kind: "script" },
+  ]);
+  const dir = makeProject({ files: { "package.json": '{"bin":{"tool":"./cli/run.js"},"scripts":{"start":"node --env-file=.env server/main.mjs && echo done"}}', "cli/run.js": "console.log(1)", "server/main.mjs": "console.log(2)", "lib/read.ts": 'import rl from "node:readline"; rl.createInterface({});', "lib/plain.ts": "export const x = 1;" } });
+  const found = JSON.parse(detect(dir, "--json").stdout).entry_points.map((e) => e.file).sort();
+  assert.deepEqual(found, ["cli/run.js", "lib/read.ts", "server/main.mjs"]);
+});
+
+test("the chat plan step is always there for a chat app; with no candidate it says to ask", () => {
+  const dir = makeProject({ files: { "package.json": '{"dependencies":{"openai":"5"}}', "src/answer.ts": 'import OpenAI from "openai";\nconst o = new OpenAI();\nexport const go = () => o.chat.completions.create({ model: "m", messages: [] });' } });
+  const out = JSON.parse(detect(dir, "--json").stdout);
+  assert.deepEqual(out.chat_id_candidates, []);
+  assert.ok(out.plan.includes("Wrap each chat turn in `zoroval.conversation(chatId, () => zoroval.turn({ input }, async (turn) => { ... }))`; no conversation id was found, so ask the developer which variable is the chat id."));
+});
+
+test("detect on the TypeScript service alone gives the TypeScript plan", () => {
+  const dir = prepareFixture(join(fixtures, "split-python-ts", "ts"), { env: { ".env": "A=1\n" } });
+  const out = JSON.parse(detect(dir, "--json").stdout);
+  assert.deepEqual(out.services, [{ path: ".", kind: "typescript", manifest: "package.json" }]);
+  assert.ok(out.plan.some((s) => s.startsWith("Install the package:")));
+  assert.ok(out.plan.includes("Run `npx zoroval login` (writes the key to .env, which must be git-ignored), then `npx zoroval doctor`."));
+});
+
+test("a Worker that calls a model in its own package still gets its plan next to a Python app", () => {
+  const { out } = report("mixed-worker", WORKER_ENV);
+  assert.ok(out.plan.some((s) => s.includes("ctx.waitUntil(zoroval.flush())")));
+  assert.equal(out.typescript.worker.config, "wrangler.toml");
 });

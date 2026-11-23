@@ -149,6 +149,7 @@ function workerCheck(report: Report, root: string): void {
 
 export async function run(o: DoctorOptions): Promise<Report> {
   const report = new Report();
+  const runStart = new Date(Date.now() - 1000); // what arrives after this belongs to this run
   report.add(PASS, "sdk", `zoroval ${VERSION}`);
   for (const name of PACKAGES) {
     const version = installedVersion(o.root, name);
@@ -199,8 +200,11 @@ export async function run(o: DoctorOptions): Promise<Report> {
   }
   report.add(PASS, "gateway", `${cfg.ingestUrl} accepts the key; project ${pyStr(body.project_key)}`);
 
+  // The doctor's own test turns and traces are in the gateway's counts for "since this run": take them out.
+  let ownTurns = 0;
+  let ownTraces = 0;
   if (!o.skipTestTrace) {
-    const start = new Date(Date.now() - 1000);
+    const start = runStart;
     const { spans } = testSpans();
     const payload = await transport.compress(transport.encodeSpans(spans));
     const batchId = uuid7();
@@ -226,6 +230,8 @@ export async function run(o: DoctorOptions): Promise<Report> {
     }
     report.add(PASS, "test trace processed", `batch ${batch.status}, ${num(batch.spans_received)} spans`);
     const traceIds = Array.isArray(batch.trace_ids) ? batch.trace_ids : [];
+    ownTurns = 2;
+    ownTraces = traceIds.length;
     if (traceIds.length === 1 && num(since.turns) >= 2) {
       report.add(PASS, "grouping", "2 test turns with one conversation id became 1 trace");
     } else {
@@ -249,6 +255,7 @@ export async function run(o: DoctorOptions): Promise<Report> {
   else {
     report.add(o.waitS <= 0 ? WARN : FAIL, "first trace received", `no app traces yet. Run your app once, then \`${CMD} doctor --wait 60\`.`);
   }
+  await thisRun(report, o, cfg.ingestUrl, key, runStart, waitUntil, ownTurns, ownTraces);
   const ungrouped = num(recent.ungrouped_turns);
   if (ungrouped) {
     report.add(
@@ -266,6 +273,46 @@ export async function run(o: DoctorOptions): Promise<Report> {
     report.add(WARN, "ingest errors", `${pyStr(e.reason_code)}: ${pyStr(e.count)}`);
   }
   return report;
+}
+
+/**
+ * "First trace received" is the project's first trace ever (a shared key may have had one long ago). This
+ * line says what arrived since this run started, or inside the `--wait` window: turns and traces from the
+ * app, how many were ungrouped, and ingest errors. Same endpoint (`since=`), no server change.
+ */
+async function thisRun(report: Report, o: DoctorOptions, ingestUrl: string, key: string, runStart: Date, waitUntil: number, ownTurns: number, ownTraces: number): Promise<void> {
+  let turns = 0;
+  let traces = 0;
+  let ungrouped = 0;
+  let errors: Json[] = [];
+  let answered = false;
+  for (;;) {
+    const [status, body] = await getJson(ingestUrl, `/v1/ingest/status?since=${encodeURIComponent(rfc3339(runStart))}`, key);
+    if (status === 200) {
+      answered = true;
+      const since = obj(body.since);
+      turns = Math.max(0, num(since.turns) - ownTurns);
+      traces = Math.max(0, num(since.traces) - ownTraces);
+      ungrouped = num(since.ungrouped_turns);
+      errors = (Array.isArray(since.errors) ? since.errors : []).map(obj);
+    }
+    if (turns > 0 || nowMs() >= waitUntil) break;
+    await sleep(1000);
+  }
+  if (!answered) return;
+  const faults = errors.map((e) => `${pyStr(e.reason_code)}: ${pyStr(e.count)}`);
+  if (turns > 0) {
+    const extra = [ungrouped ? `${ungrouped} ungrouped` : "", ...(faults.length ? [`errors ${faults.join(", ")}`] : [])].filter(Boolean);
+    report.add(
+      ungrouped || faults.length ? WARN : PASS,
+      "traces this run",
+      `${turns} turn${turns === 1 ? "" : "s"} in ${traces} trace${traces === 1 ? "" : "s"} arrived from the app since this run started` + (extra.length ? ` (${extra.join("; ")})` : ""),
+    );
+  } else if (o.waitS > 0) {
+    report.add(WARN, "traces this run", `no new app traces in the last ${Math.round(o.waitS)} s${faults.length ? ` (errors ${faults.join(", ")})` : ""}. Send a chat message to the app while doctor waits.`);
+  } else {
+    report.add(WARN, "traces this run", `no app traces since this run started${faults.length ? ` (errors ${faults.join(", ")})` : ""}. Run your app, then \`${CMD} doctor --wait 60\`.`);
+  }
 }
 
 /** Python's `str(None)` for a server field that may be missing. */

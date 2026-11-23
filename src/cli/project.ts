@@ -99,16 +99,3 @@ function packageDeps(root: string): Record<string, string> {
 export function isNext(root: string): boolean {
   return "next" in packageDeps(root) || NEXT_CONFIGS.some((f) => existsSync(join(root, f)));
 }
-
-export type ProjectKind = "worker" | "next" | "node";
-
-export function projectKind(root: string): ProjectKind {
-  if (findWrangler(root)) return "worker";
-  return isNext(root) ? "next" : "node";
-}
-
-/** `.dev.vars` for a Worker (what `wrangler dev` reads), `.env.local` for Next.js, else `.env`. */
-export function defaultEnvFile(root: string): string {
-  const kind = projectKind(root);
-  return kind === "worker" ? ".dev.vars" : kind === "next" ? ".env.local" : ".env";
-}

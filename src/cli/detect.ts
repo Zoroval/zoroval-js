@@ -167,6 +167,28 @@ function parsePackageJson(text: string): Record<string, string> {
   return out;
 }
 
+/** Files a package.json runs: its `bin` and the script files named in `scripts` (`tsx src/chat.ts`, `node dist/run.js`). */
+function packageScriptTargets(text: string): string[] {
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  const bin = data?.bin;
+  if (typeof bin === "string") out.push(bin);
+  else if (bin && typeof bin === "object") out.push(...Object.values(bin).filter((v): v is string => typeof v === "string"));
+  const scripts = data?.scripts;
+  if (scripts && typeof scripts === "object") {
+    for (const command of Object.values(scripts)) {
+      if (typeof command !== "string") continue;
+      for (const word of command.split(/\s+/)) if (/^[\w@./-]+\.[cm]?[jt]sx?$/.test(word) && !word.startsWith("-")) out.push(word.replace(/^\.\//, ""));
+    }
+  }
+  return out;
+}
+
 const major = (spec: string | null | undefined): number | null => {
   const m = /(\d+)/.exec(spec ?? "");
   return m ? Number(m[1]) : null;
@@ -200,6 +222,9 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
   };
   let pyPackages: Record<string, string> = {};
   const jsPackages: Record<string, string> = {};
+  const serviceDeps = new Map<string, Record<string, string>>(); // package.json folder -> its dependencies
+  const scriptTargets = new Set<string>(); // files the package.json `bin` and `scripts` run
+  const pythonManifests: Json[] = []; // every Python service folder, before the one-service-per-folder rule
   const envFiles: string[] = [];
   const devVarsFiles: string[] = [];
   const pyFiles: string[] = [];
@@ -225,12 +250,16 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
       for (const [k, v] of Object.entries(deps)) if (v || !(k in pyPackages)) pyPackages[k] = v;
       if (name === "pyproject.toml" || name === "setup.py" || name === "requirements.txt") {
         const service = posix.dirname(relPath);
+        if (!pythonManifests.some((s) => s.path === service)) pythonManifests.push({ path: service, kind: "python", manifest: relPath });
         if (!report.services.some((s: Json) => s.path === service)) report.services.push({ path: service, kind: "python", manifest: relPath });
       }
     } else if (name === "uv.lock" || name === "poetry.lock") {
       Object.assign(pyPackages, parseLock(readText(path)));
     } else if (name === "package.json") {
-      Object.assign(jsPackages, parsePackageJson(readText(path)));
+      const packageText = readText(path);
+      Object.assign(jsPackages, parsePackageJson(packageText));
+      serviceDeps.set(posix.dirname(relPath), parsePackageJson(packageText));
+      for (const target of packageScriptTargets(packageText)) scriptTargets.add(posix.normalize(posix.join(posix.dirname(relPath), target)));
       report.services.push({ path: posix.dirname(relPath), kind: "typescript", manifest: relPath });
     } else if (name === ".env" || name.startsWith(".env.") || name.endsWith(".env")) {
       envFiles.push(path);
@@ -328,7 +357,14 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
   }
   const worker = findWrangler(root);
   const nextProject = isNext(root);
-  const usesZoroval = "zoroval" in jsPackages || [...tsScans.values()].some((r) => r.imports.has("zoroval"));
+  // Each file belongs to the service (package.json folder) that is closest to it.
+  const tsServicePaths = (report.services as Json[]).filter((s) => s.kind === "typescript").map((s) => s.path as string).sort((a, b) => b.length - a.length);
+  const serviceOf = (file: string): string => tsServicePaths.find((p) => p === "." || file.startsWith(p + "/")) ?? ".";
+  const workerMain = worker?.main ? posix.normalize(worker.main.split("\\").join("/")).replace(/^\.\//, "") : worker?.file ?? ".";
+  const workerService = serviceOf(workerMain);
+  const llmInWorker = tsOpenAICalls.filter((c) => serviceOf(c.file) === workerService).length;
+  const zorovalInWorker = "zoroval" in (serviceDeps.get(workerService) ?? {}) ||
+    [...tsScans].some(([file, r]) => serviceOf(file) === workerService && r.imports.has("zoroval"));
   const pythonCalls = (report.llm_calls as Json[]).length > 0;
   const hasPythonService = (report.services as Json[]).some((s) => s.kind === "python");
   const hasTsService = (report.services as Json[]).some((s) => s.kind === "typescript") || worker !== null;
@@ -338,16 +374,20 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
     : hasPythonService && hasTsService ? "both"
     : hasTsService ? "typescript" : "python";
   const includeTs = lang !== "python";
-  const workerRelevant = includeTs && worker !== null && (tsOpenAICalls.length > 0 || usesZoroval);
+  // A Worker is set up only when it calls a model itself (or already uses zoroval). A Worker that forwards
+  // requests to another service (or to a container) is not instrumented. With no model call anywhere in a
+  // TypeScript-only repo there is nothing else to point at, so the Worker counts.
+  const noCalls = !pythonCalls && tsOpenAICalls.length === 0;
+  const workerRelevant = includeTs && worker !== null && (llmInWorker > 0 || zorovalInWorker || (noCalls && lang === "typescript"));
   // A Python-only project gets exactly what the Python CLI prints: no TypeScript scan results at all.
   if (includeTs) {
     report.llm_calls.push(...tsOpenAICalls);
     report.chat_id_candidates.push(...tsChatIds);
-    if (worker) {
+    if (workerRelevant && worker) {
       report.typescript.worker = { config: worker.file, main: worker.main, compatibility_flags: worker.flags, nodejs_als: worker.als };
     }
     if (nextProject) report.typescript.nextjs = true;
-    addTypescriptEntryPoints(report, tsScans, worker);
+    addTypescriptEntryPoints(report, tsScans, workerRelevant ? worker : null, scriptTargets, workerRelevant || worker === null);
     addFrameworkEntryPoints(report, tsScans); // last: nothing above depends on it
     envFiles.push(...devVarsFiles);
   }
@@ -371,7 +411,7 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
     if (base === "vercel.json" && pyFiles.length) report.serverless.push({ kind: "vercel_python", file: relPath });
     else if (includeTs && base === "vercel.json" && report.services.some((s: Json) => s.kind === "typescript")) report.serverless.push({ kind: "vercel", file: relPath });
   }
-  if (includeTs && worker) report.serverless.push({ kind: "cloudflare_worker", file: worker.file });
+  if (workerRelevant && worker) report.serverless.push({ kind: "cloudflare_worker", file: worker.file });
   const lowered = hintText.toLowerCase();
   report.secrets_managers = [...new Set(SECRETS_HINTS.filter((h) => lowered.includes(h)).map((h) => h.trim()))].sort();
 
@@ -406,7 +446,17 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
     repo_is_git: envfile.gitRoot(root) !== null,
   };
 
-  classify(report, pyPackages, jsPackages, imports, includeTs && tsOpenAICalls.length > 0, includeTs, lang, worker, workerRelevant, nextProject);
+  if (lang === "both" && tsOpenAICalls.length) {
+    // Name the services that matter: the Python ones, and the TypeScript ones that call a model (not a
+    // package.json that only holds a Worker's tooling).
+    const llmServices = new Set(tsOpenAICalls.map((c) => serviceOf(c.file)));
+    report.services = [
+      ...pythonManifests,
+      ...(report.services as Json[]).filter((s) => s.kind === "typescript" && (llmServices.has(s.path) || "zoroval" in (serviceDeps.get(s.path) ?? {}))),
+    ];
+  }
+  const serviceFor = (file: string): string => (isTsFile(file) ? serviceOf(file) : pythonManifests.map((s) => s.path as string).sort((a, b) => b.length - a.length).find((p) => p === "." || file.startsWith(p + "/")) ?? ".");
+  classify(report, pyPackages, jsPackages, imports, includeTs && tsOpenAICalls.length > 0, includeTs, lang, worker, workerRelevant, nextProject, serviceFor);
   return { report, info: { lang, worker, workerRelevant, nextProject } };
 }
 
@@ -418,11 +468,12 @@ function isSymlink(path: string): boolean {
   }
 }
 
+const TEST_FILE = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 const NEXT_ROUTE = /(^|\/)app\/(.*\/)?route\.(ts|tsx|js|jsx|mjs|cjs)$/;
 const NEXT_PAGES_API = /(^|\/)pages\/api\/.+\.(ts|tsx|js|jsx|mjs|cjs)$/;
 
 /** Entry points of TypeScript apps: the Worker, then Next.js handlers. (Express, Hono and Fastify are added last.) */
-function addTypescriptEntryPoints(report: Json, scans: Map<string, ReturnType<typeof scanJs>>, worker: Wrangler | null): void {
+function addTypescriptEntryPoints(report: Json, scans: Map<string, ReturnType<typeof scanJs>>, worker: Wrangler | null, scriptTargets: Set<string>, allowWorkerEntries: boolean): void {
   const entries: Json[] = [];
   const known = (file: string) => entries.some((e) => e.file === file) || report.entry_points.some((e: Json) => e.file === file);
   if (worker?.main) {
@@ -430,12 +481,19 @@ function addTypescriptEntryPoints(report: Json, scans: Map<string, ReturnType<ty
     entries.push({ file: main, line: scans.get(main)?.workerLine ?? null, kind: "worker" });
   }
   for (const [file, result] of scans) {
-    if (result.workerLine !== null && !known(file)) entries.push({ file, line: result.workerLine, kind: "worker" });
+    if (allowWorkerEntries && result.workerLine !== null && !known(file)) entries.push({ file, line: result.workerLine, kind: "worker" });
   }
   for (const [file, result] of scans) {
     if (known(file)) continue;
     if (NEXT_ROUTE.test(file)) entries.push({ file, line: result.handlerLine, kind: "nextjs_route" });
     else if (NEXT_PAGES_API.test(file)) entries.push({ file, line: result.handlerLine, kind: "nextjs_api" });
+  }
+  // Programs run from the terminal: what a package.json `bin` or `scripts` entry runs, and files that read a
+  // terminal (`readline`) or `process.argv`.
+  for (const [file, result] of scans) {
+    if (!known(file) && !entries.some((e) => e.file === file) && (scriptTargets.has(file) || result.cliMain) && !TEST_FILE.test(file)) {
+      entries.push({ file, line: null, kind: "script" });
+    }
   }
   report.entry_points.push(...entries);
 }
@@ -455,7 +513,7 @@ function addFrameworkEntryPoints(report: Json, scans: Map<string, ReturnType<typ
 
 const has = (packages: Record<string, string>, ...names: string[]): boolean => names.some((n) => norm(n) in packages);
 
-function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsOpenAI: boolean, includeTs: boolean, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean): void {
+function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsOpenAI: boolean, includeTs: boolean, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, serviceFor: (file: string) => string): void {
   const cases: (number | string)[] = [];
   const explain: (number | string)[] = [];
   const notes: string[] = report.notes;
@@ -517,12 +575,13 @@ function classify(report: Json, py: Record<string, string>, js: Record<string, s
   if (worker && workerRelevant && !worker.als) {
     notes.push(`${worker.file} has neither the nodejs_als nor the nodejs_compat compatibility flag: turns will not be grouped into conversations. Add nodejs_als to compatibility_flags.`);
   }
-  report.plan = makePlan(report, lang, worker, workerRelevant, nextProject, usesOpenai);
+  report.plan = makePlan(report, lang, worker, workerRelevant, nextProject, usesOpenai, serviceFor);
 }
 
 const isTsFile = (file: string): boolean => TS_EXT.some((ext) => file.endsWith(ext));
 
-function makePlan(report: Json, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean): string[] {
+function makePlan(report: Json, lang: Lang, rawWorker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, serviceFor: (file: string) => string): string[] {
+  const worker = workerRelevant ? rawWorker : null; // a Worker that only forwards requests is not part of the plan
   const cases = report.cases as number[];
   const plan: string[] = [];
   const entryOf = (pred: (e: Json) => boolean) => (report.entry_points as Json[]).find(pred)?.file as string | undefined;
@@ -531,13 +590,14 @@ function makePlan(report: Json, lang: Lang, worker: Wrangler | null, workerRelev
   const tsOnly = lang === "typescript";
 
   if (lang === "both") {
-    const where = (pred: (f: string) => boolean) => (report.llm_calls as Json[]).find((c) => pred(c.file))?.file;
+    const where = (pred: (f: string) => boolean) => (report.llm_calls as Json[]).find((c) => pred(c.file))?.file as string | undefined;
     const py = where((f) => !isTsFile(f));
     const ts = where(isTsFile);
-    plan.push(`Two languages in this repo${py && ts ? ` (Python: ${py}; TypeScript: ${ts})` : ""}: set each one up with its own SDK (\`pip install zoroval\` for Python, \`npm install zoroval\` for TypeScript).`);
+    const at = (file: string | undefined) => (file ? `${file} in ${serviceFor(file) === "." ? "the repo root" : serviceFor(file)}` : "");
+    plan.push(`Two languages in this repo${py && ts ? ` (Python: ${at(py)}; TypeScript: ${at(ts)})` : ""}: set each one up with its own SDK (\`pip install zoroval\` for Python, \`npm install zoroval\` for TypeScript).`);
   }
   if (!tsOnly) {
-    const entry = report.entry_points.length ? report.entry_points[0].file : null;
+    const entry = (report.entry_points as Json[]).find((e) => !isTsFile(e.file))?.file ?? null;
     if (hasPython) plan.push("Add `zoroval` to the Python dependencies.");
     if (cases.includes(2) || cases.includes(3) || cases.includes(4)) {
       plan.push(`Add \`import zoroval\` and \`zoroval.init()\` after the existing tracing setup (${entry ? "in " + entry : "at the app entry"}); it attaches to the existing provider.`);
@@ -546,15 +606,15 @@ function makePlan(report: Json, lang: Lang, worker: Wrangler | null, workerRelev
     }
     if (cases.includes(4)) plan.push("Keep their instrumentor; do not add a second OpenAI wrapper (zoroval detects theirs).");
     if (report.chat_id_candidates.length && !cases.includes(2)) {
-      const first = report.chat_id_candidates.find((c: Json) => !isTsFile(c.file)) ?? report.chat_id_candidates[0];
-      plan.push(`Wrap each chat turn in \`with zoroval.conversation(${first.name}):\` (candidate at ${first.file}:${first.line}).`);
+      const first = (report.chat_id_candidates as Json[]).find((c) => !isTsFile(c.file));
+      if (first) plan.push(`Wrap each chat turn in \`with zoroval.conversation(${first.name}):\` (candidate at ${first.file}:${first.line}).`);
     }
     if (cases.includes(7)) {
       if (report.serverless.some((s: Json) => s.kind !== "cloudflare_worker")) plan.push("Call `zoroval.flush()` at the end of each serverless handler.");
       if (report.servers.gunicorn) plan.push("Pre-fork servers: nothing extra; the SDK restarts its export thread after fork.");
     }
   }
-  if (hasTypescript) plan.push(...typescriptPlan(report, worker, workerRelevant, nextProject, usesOpenai, entryOf));
+  if (hasTypescript) plan.push(...typescriptPlan(report, worker, workerRelevant, nextProject, usesOpenai, entryOf, serviceFor));
   if (cases.includes(6)) {
     plan.push("TypeScript: register an OTLP exporter to the Zoroval endpoint with the key header; pass the chat id in experimental_telemetry metadata.");
   }
@@ -574,15 +634,19 @@ function makePlan(report: Json, lang: Lang, worker: Wrangler | null, workerRelev
   return plan;
 }
 
-function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, entryOf: (pred: (e: Json) => boolean) => string | undefined): string[] {
+function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, entryOf: (pred: (e: Json) => boolean) => string | undefined, serviceFor: (file: string) => string): string[] {
   const plan: string[] = [];
   const tsCalls = (report.llm_calls as Json[]).filter((c) => isTsFile(c.file));
+  // The services that call a model: the plan points at them, not at a neighbouring package.
+  const services = [...new Set(tsCalls.map((c) => serviceFor(c.file)))];
+  const inScope = (file: string) => !services.length || services.includes(serviceFor(file));
   const entry = worker
     ? entryOf((e) => e.kind === "worker")
     : nextProject
       ? entryOf((e) => String(e.kind).startsWith("nextjs"))
-      : entryOf((e) => isTsFile(e.file));
-  plan.push("Install the package: `npm install zoroval` (or the project's package manager).");
+      : entryOf((e) => isTsFile(e.file) && inScope(e.file));
+  const where = services.length === 1 && services[0] !== "." ? ` in \`${services[0]}\`` : "";
+  plan.push(`Install the package${where}: \`npm install zoroval\` (or the project's package manager).`);
   if (worker) {
     plan.push(`Worker: in the \`fetch\` handler${entry ? ` (${entry})` : ""} call \`zoroval.init({ apiKey: env.ZOROVAL_INGEST_KEY })\` (\`import * as zoroval from "zoroval"\`).`);
   } else {
@@ -592,9 +656,12 @@ function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: b
     plan.push("Wrap the OpenAI client: `const openai = zoroval.wrapOpenAI(new OpenAI())`.");
   }
   if (tsCalls.some((c) => c.api === "fetch")) plan.push("Use `zoroval.wrapFetch()` as the `fetch` for the calls to api.openai.com.");
-  const candidate = (report.chat_id_candidates as Json[]).find((c) => isTsFile(c.file));
-  if (candidate) {
-    plan.push(`Wrap each chat turn in \`zoroval.conversation(${candidate.name}, () => zoroval.turn({ input }, async (turn) => { ... }))\` (candidate at ${candidate.file}:${candidate.line}).`);
+  if (tsCalls.length || usesOpenai) {
+    // A chat app always needs this step: with a candidate it says where, without one it says to ask.
+    const candidate = (report.chat_id_candidates as Json[]).find((c) => isTsFile(c.file) && inScope(c.file));
+    plan.push(candidate
+      ? `Wrap each chat turn in \`zoroval.conversation(${candidate.name}, () => zoroval.turn({ input }, async (turn) => { ... }))\` (candidate at ${candidate.file}:${candidate.line}).`
+      : "Wrap each chat turn in `zoroval.conversation(chatId, () => zoroval.turn({ input }, async (turn) => { ... }))`; no conversation id was found, so ask the developer which variable is the chat id.");
   }
   if (worker) {
     plan.push("Hand the flush to the platform: `ctx.waitUntil(zoroval.flush())` before the `fetch` handler returns.");
