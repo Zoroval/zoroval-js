@@ -29,6 +29,7 @@ import { getJson } from "./http.js";
 import type { Json } from "./http.js";
 import { CMD } from "./login.js";
 import { envFileCandidates, projectInfo } from "./lang.js";
+import { findWrangler, isNext } from "./project.js";
 import * as setupReport from "./setup-report.js";
 import { DEFAULT_INGEST_URL } from "./constants.js";
 
@@ -147,6 +148,12 @@ function workerCheck(report: Report, root: string): void {
   );
 }
 
+/** The app's own dev runtime reads this env file itself: Wrangler reads .dev.vars, Next.js its .env files. */
+function runtimeLoads(root: string, file: string): boolean {
+  if ((file === ".dev.vars" || file.startsWith(".dev.vars.")) && findWrangler(root)) return true;
+  return [".env", ".env.local", ".env.development", ".env.development.local"].includes(file) && isNext(root);
+}
+
 export async function run(o: DoctorOptions): Promise<Report> {
   const report = new Report();
   const runStart = new Date(Date.now() - 1000); // what arrives after this belongs to this run
@@ -169,7 +176,7 @@ export async function run(o: DoctorOptions): Promise<Report> {
     return report;
   }
   report.add(PASS, "key", `found in ${source}, key id ${keyId}`);
-  if (source !== "environment") {
+  if (source !== "environment" && !runtimeLoads(o.root, source)) {
     report.add(
       WARN,
       "key loading",

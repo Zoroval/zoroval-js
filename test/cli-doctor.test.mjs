@@ -128,16 +128,25 @@ test("a key that is not an ingest key fails and is not sent anywhere", async () 
   await gw.close();
 });
 
-test("the key is read from the project's env file, with a warning that the shell does not have it", async () => {
+test("the key is read from the project's env file; the shell warning only where the runtime does not load that file", async () => {
   const gw = await startGateway();
-  const dir = makeProject({ files: { "wrangler.toml": 'name="w"\ncompatibility_flags=["nodejs_als"]', ".dev.vars": `ZOROVAL_INGEST_KEY=${KEY}\nZOROVAL_INGEST_URL=${gw.url}\n` } });
-  const r = await runCli(["doctor", "--root", dir, "--timeout", "5", "--json"], { cwd: dir });
-  assert.equal(r.code, 0, r.stdout);
-  const checks = json(r).checks;
-  assert.equal(checks.find((c) => c.check === "key").detail, "found in .dev.vars, key id abcdefghijkl");
-  assert.equal(checks.find((c) => c.check === "key loading").level, "warn");
-  assert.match(checks.find((c) => c.check === "key loading").detail, /not in this shell's environment.*wrangler dev.*\.dev\.vars/);
-  assert.equal(checks.find((c) => c.check === "gateway").detail.startsWith(gw.url), true); // URL from the file
+  const vars = `ZOROVAL_INGEST_KEY=${KEY}\nZOROVAL_INGEST_URL=${gw.url}\n`;
+  const cases = [
+    [{ "wrangler.toml": 'name="w"\ncompatibility_flags=["nodejs_als"]', ".dev.vars": vars }, ".dev.vars", false], // wrangler dev reads it
+    [{ "package.json": '{"dependencies":{"next":"16.0.0"}}', ".env.local": vars }, ".env.local", false], // next dev reads it
+    [{ "package.json": "{}", ".env": vars }, ".env", true], // plain Node needs dotenv or --env-file
+  ];
+  for (const [files, file, warns] of cases) {
+    const dir = makeProject({ files });
+    const r = await runCli(["doctor", "--root", dir, "--timeout", "5", "--json"], { cwd: dir });
+    assert.equal(r.code, 0, r.stdout);
+    const checks = json(r).checks;
+    assert.equal(checks.find((c) => c.check === "key").detail, `found in ${file}, key id abcdefghijkl`);
+    const loading = checks.find((c) => c.check === "key loading");
+    assert.equal(Boolean(loading), warns, file);
+    if (warns) assert.match(loading.detail, /not in this shell's environment.*dotenv/);
+    assert.equal(checks.find((c) => c.check === "gateway").detail.startsWith(gw.url), true); // URL from the file
+  }
   await gw.close();
 });
 

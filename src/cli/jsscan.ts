@@ -4,7 +4,7 @@
  * mention of `chat.completions.create(` in a comment or a string is not a call.
  *
  * Reports: OpenAI calls (`.chat.completions.create|parse|stream(`, `.responses.create|parse|stream(`,
- * `fetch(` to `api.openai.com/v1/`), conversation-id candidates (parameters, properties, destructured
+ * `fetch(` to an OpenAI chat or responses URL, literal or built from a base variable), conversation-id candidates (parameters, properties, destructured
  * fields), module imports, and Worker entry points (`export default { fetch }`, `addEventListener("fetch")`).
  */
 
@@ -150,7 +150,8 @@ function tokenize(src: string): Tok[] {
 }
 
 export interface JsScan {
-  llmCalls: [number, string][]; // [line, api]
+  /** [line, api], plus for `fetch` the base URL when it is not api.openai.com ("variable" when not literal). */
+  llmCalls: [number, string, string?][];
   chatIds: [number, string][];
   imports: Set<string>;
   /** Line of `export default { fetch }` or `addEventListener("fetch", ...)`, if any. */
@@ -164,6 +165,17 @@ export interface JsScan {
 }
 
 const OPENAI_URL = "api.openai.com/v1/";
+// The paths `wrapFetch()` traces. Embeddings are not counted: wrapFetch passes them through untraced.
+const OPENAI_PATH = /\/(chat\/completions|responses)\/?(\?.*)?$/;
+
+/** For a URL text (`${...}` where a part is not literal): the base to pass `wrapFetch`, null for api.openai.com, undefined when not an OpenAI call. */
+function fetchBase(text: string): string | null | undefined {
+  if (text.includes(OPENAI_URL)) return null;
+  const path = OPENAI_PATH.exec(text);
+  if (!path) return undefined;
+  const base = text.slice(0, path.index);
+  return /^https?:\/\/[^$]+$/.test(base) ? base : "variable";
+}
 const CONTROL = new Set(["if", "for", "while", "switch", "catch", "with"]);
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -216,10 +228,33 @@ export function scanJs(source: string): JsScan {
     }
   };
 
-  // strings bound to a name (`const url = "https://api.openai.com/v1/..."`), for `fetch(url)`
+  /** The URL text of an expression from token `from` up to `end`: literal parts kept, the rest `${}`. */
+  const urlText = (from: number, end: number): string => {
+    let text = "";
+    for (let j = from; j < end; j++) {
+      const tok = toks[j]!;
+      if (tok.k === "str") text += tok.v;
+      else if (op(j, "+")) continue;
+      else if (!text.endsWith("${}")) text += "${}";
+      if (op(j, "(", "[", "{") && match[j]! > j) j = match[j]!;
+    }
+    return text;
+  };
+  /** End of the expression that starts at `from`: the first `,` `;` or closing bracket at its level. */
+  const exprEnd = (from: number): number => {
+    let j = from;
+    while (j < n && !op(j, ",", ";", ")", "]", "}")) j = op(j, "(", "[", "{") && match[j]! > j ? match[j]! + 1 : j + 1;
+    return j;
+  };
+
+  // URLs bound to a name (`const url = "https://api.openai.com/v1/..."`, `` `${base}/chat/completions` ``,
+  // `base + "/responses"`), for `fetch(url)`
   const bound = new Map<string, string>();
   for (let i = 0; i + 2 < n; i++) {
-    if (nm(i) && op(i + 1, "=") && toks[i + 2]!.k === "str") bound.set(toks[i]!.v, toks[i + 2]!.v);
+    if (nm(i) && op(i + 1, "=") && !op(i + 2, "=", ">") && !dot(i - 1)) {
+      const end = exprEnd(i + 2);
+      if (end - (i + 2) <= 12 && toks.slice(i + 2, end).some((tok) => tok.k === "str")) bound.set(toks[i]!.v, urlText(i + 2, end));
+    }
   }
 
   for (let i = 0; i < n; i++) {
@@ -254,8 +289,10 @@ export function scanJs(source: string): JsScan {
     }
     if (t.k === "name" && t.v === "fetch" && op(i + 1, "(") && !(dot(i - 1) && !nm(i - 2, "globalThis") && !nm(i - 2, "window") && !nm(i - 2, "self"))) {
       const arg = toks[i + 2];
-      const url = arg?.k === "str" ? arg.v : arg?.k === "name" && !op(i + 3, ".", "(") ? bound.get(arg.v) : undefined;
-      if (url !== undefined && url.includes(OPENAI_URL)) result.llmCalls.push([t.line, "fetch"]);
+      const end = exprEnd(i + 2);
+      const url = arg?.k === "name" && end === i + 3 ? bound.get(arg.v) : urlText(i + 2, end);
+      const base = url === undefined ? undefined : fetchBase(url);
+      if (base !== undefined) result.llmCalls.push(base === null ? [t.line, "fetch"] : [t.line, "fetch", base]);
     }
 
     // ---- Worker entry points

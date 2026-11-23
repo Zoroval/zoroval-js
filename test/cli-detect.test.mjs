@@ -115,11 +115,27 @@ test("Worker with plain fetch and the nodejs_als flag: entry point, flag reporte
   assert.deepEqual(out.notes, []);
   assert.deepEqual(out.cases, [1, 7, 9]);
   assert.deepEqual(out.env.env_files.map((e) => [e.path, e.names]), [[".dev.vars", ["OPENAI_API_KEY"]], [".dev.vars.staging", ["X"]]]);
-  assert.ok(out.plan.includes("Worker: in the `fetch` handler (src/index.ts) call `zoroval.init({ apiKey: env.ZOROVAL_INGEST_KEY })` (`import * as zoroval from \"zoroval\"`)."));
-  assert.ok(out.plan.includes("Hand the flush to the platform: `ctx.waitUntil(zoroval.flush())` before the `fetch` handler returns."));
+  assert.ok(out.plan.includes("Worker: wrap the default export in src/index.ts: `export default zoroval.withZoroval({ async fetch(request, env, ctx) { ... } })` (`import * as zoroval from \"zoroval\"`). It reads ZOROVAL_INGEST_KEY from the Worker's bindings and sends the trace after the response; no `init()` or `flush()` call is needed."));
+  assert.ok(!out.plan.some((s) => s.includes("zoroval.init(") || s.includes("waitUntil")), "the plan says what the guide says: withZoroval, no init or flush");
   assert.ok(out.plan.includes("Run `npx zoroval login` (writes the key to .dev.vars, which must be git-ignored), then `npx zoroval doctor`."));
   assert.ok(out.plan.includes("Production: make a deploy key in the app and run `wrangler secret put ZOROVAL_INGEST_KEY` yourself; the skill writes nothing there."));
   assert.ok(!out.plan.some((s) => s.includes("nodejs_als to compatibility_flags") || s.startsWith("Add `nodejs_als`")));
+});
+
+test("Worker calling OpenAI with fetch through a base URL variable: counted, and the plan gives wrapFetch baseURLs", () => {
+  const { out } = report("worker-fetch-base", WORKER_ENV);
+  assert.deepEqual(out.llm_calls, [
+    { file: "src/index.ts", line: 8, provider: "openai", api: "fetch", base_url: "variable" },
+    { file: "src/index.ts", line: 14, provider: "openai", api: "fetch", base_url: "variable" },
+    { file: "src/index.ts", line: 15, provider: "openai", api: "fetch", base_url: "https://llm.example.com/v1" },
+  ]);
+  assert.equal(out.tracing.openai, true);
+  assert.ok(out.plan.some((s) => s.startsWith("Worker: wrap the default export in src/index.ts: `export default zoroval.withZoroval(")));
+  const step = out.plan.find((s) => s.includes("baseURLs"));
+  assert.ok(step, out.plan.join("\n"));
+  assert.match(step, /src\/index\.ts:8/);
+  assert.match(step, /zoroval\.wrapFetch\(fetch, \{ baseURLs: \["https:\/\/llm\.example\.com\/v1"\] \}\)/);
+  assert.match(step, /same value the code builds the URL from/);
 });
 
 test("Worker without the flag: reported, noted, and the plan adds the flag", () => {
@@ -344,6 +360,6 @@ test("detect on the TypeScript service alone gives the TypeScript plan", () => {
 
 test("a Worker that calls a model in its own package still gets its plan next to a Python app", () => {
   const { out } = report("mixed-worker", WORKER_ENV);
-  assert.ok(out.plan.some((s) => s.includes("ctx.waitUntil(zoroval.flush())")));
+  assert.ok(out.plan.some((s) => s.includes("zoroval.withZoroval(")));
   assert.equal(out.typescript.worker.config, "wrangler.toml");
 });

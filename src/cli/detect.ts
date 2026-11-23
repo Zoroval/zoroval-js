@@ -352,7 +352,7 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
   const tsOpenAICalls: Json[] = [];
   const tsChatIds: Json[] = [];
   for (const [file, result] of tsScans) {
-    for (const [line, api] of result.llmCalls) tsOpenAICalls.push({ file, line, provider: "openai", api });
+    for (const [line, api, base] of result.llmCalls) tsOpenAICalls.push({ file, line, provider: "openai", api, ...(base ? { base_url: base } : {}) });
     for (const [line, name] of result.chatIds) tsChatIds.push({ file, line, name });
   }
   const worker = findWrangler(root);
@@ -648,14 +648,21 @@ function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: b
   const where = services.length === 1 && services[0] !== "." ? ` in \`${services[0]}\`` : "";
   plan.push(`Install the package${where}: \`npm install zoroval\` (or the project's package manager).`);
   if (worker) {
-    plan.push(`Worker: in the \`fetch\` handler${entry ? ` (${entry})` : ""} call \`zoroval.init({ apiKey: env.ZOROVAL_INGEST_KEY })\` (\`import * as zoroval from "zoroval"\`).`);
+    plan.push(`Worker: wrap the default export${entry ? ` in ${entry}` : ""}: \`export default zoroval.withZoroval({ async fetch(request, env, ctx) { ... } })\` (\`import * as zoroval from "zoroval"\`). It reads ZOROVAL_INGEST_KEY from the Worker's bindings and sends the trace after the response; no \`init()\` or \`flush()\` call is needed.`);
   } else {
     plan.push(`Add \`import * as zoroval from "zoroval"\` and call \`zoroval.init()\` once when the app starts${entry ? ` (for example in ${entry})` : ""}.`);
   }
   if (tsCalls.some((c) => c.api !== "fetch") || (usesOpenai && !tsCalls.length && "openai" in report.packages.typescript)) {
     plan.push("Wrap the OpenAI client: `const openai = zoroval.wrapOpenAI(new OpenAI())`.");
   }
-  if (tsCalls.some((c) => c.api === "fetch")) plan.push("Use `zoroval.wrapFetch()` as the `fetch` for the calls to api.openai.com.");
+  const fetchCalls = tsCalls.filter((c) => c.api === "fetch");
+  if (fetchCalls.some((c) => !c.base_url)) plan.push("Use `zoroval.wrapFetch()` as the `fetch` for the calls to api.openai.com.");
+  const bases = [...new Set(fetchCalls.map((c) => c.base_url).filter(Boolean))];
+  if (bases.length) {
+    const literal = bases.filter((b) => b !== "variable");
+    const at = fetchCalls.filter((c) => c.base_url).map((c) => `${c.file}:${c.line}`).slice(0, 3).join(", ");
+    plan.push(`For the \`fetch\` calls whose base URL is not api.openai.com (${at}), pass that base so they are traced: \`zoroval.wrapFetch(fetch, { baseURLs: [${literal.length ? literal.map((b) => JSON.stringify(b)).join(", ") : "base"}] })\`${bases.includes("variable") ? ", with the same value the code builds the URL from (when it defaults to https://api.openai.com/v1, plain `zoroval.wrapFetch()` covers that default)" : ""}.`);
+  }
   if (tsCalls.length || usesOpenai) {
     // A chat app always needs this step: with a candidate it says where, without one it says to ask.
     const candidate = (report.chat_id_candidates as Json[]).find((c) => isTsFile(c.file) && inScope(c.file));
@@ -664,7 +671,6 @@ function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: b
       : "Wrap each chat turn in `zoroval.conversation(chatId, () => zoroval.turn({ input }, async (turn) => { ... }))`; no conversation id was found, so ask the developer which variable is the chat id.");
   }
   if (worker) {
-    plan.push("Hand the flush to the platform: `ctx.waitUntil(zoroval.flush())` before the `fetch` handler returns.");
     if (workerRelevant && !worker.als) plan.push(`Add \`nodejs_als\` to compatibility_flags in ${worker.file}; without it turns are not grouped into conversations.`);
   } else if (nextProject) {
     plan.push("Hand the flush to the platform: `after(() => zoroval.flush())` in Next.js 15 (or `waitUntil` from `@vercel/functions`) at the end of each route that calls the model.");
