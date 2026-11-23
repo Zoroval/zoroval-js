@@ -284,9 +284,10 @@ export function scanJs(source: string): JsScan {
       const next = i + 1;
       let candidate = false;
       if (dot(prev)) candidate = true; // request.chatId, body?.chatId
-      else if (op(prev, "{", ",", "(")) {
-        if (op(next, ":") || (op(next, "?") && op(next + 1, ":"))) candidate = true; // { chatId: x }, (chatId: string), (chatId?: string)
-        else if (op(prev, "{", ",") && op(next, "}", ",", "=") && toks[parent[i]!]?.v === "{") candidate = true; // { chatId }, { chatId = 1 }
+      else if ((op(next, ":") || (op(next, "?") && op(next + 1, ":"))) && !op(prev, "?") && !nm(prev, "case")) {
+        candidate = true; // { chatId: x }, (chatId: string), (chatId?: string), an interface member after `;` or a line end
+      } else if (op(prev, "{", ",", "(")) {
+        if (op(prev, "{", ",") && op(next, "}", ",", "=") && toks[parent[i]!]?.v === "{") candidate = true; // { chatId }, { chatId = 1 }
         else if (op(prev, "(", ",") && op(next, ",", ")", "=") && toks[parent[i]!]?.v === "(") {
           const open = parent[i]!;
           const close = match[open]!;
