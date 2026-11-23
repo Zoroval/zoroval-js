@@ -232,3 +232,24 @@ test("timestamps: nanosecond strings, parent before child, a 1 ms span has a dur
   assert.ok(turns.some((s) => big(s.endTimeUnixNano) > big(s.startTimeUnixNano)), "durations are not all zero");
   await gateway.close();
 });
+
+test("clock re-anchors to the wall clock: a 10 s drift does not leave timestamps off", async () => {
+  const internal = await import("../.test-build/internal.js");
+  const realNow = Date.now;
+  try {
+    const stamp = (t) => Number(BigInt(t.ms)) + t.ns / 1e6;
+    internal.now(); // anchored
+    assert.ok(Math.abs(stamp(internal.now()) - Date.now()) < 50);
+    Date.now = () => realNow() + 10_000; // the wall clock jumps 10 s ahead (NTP step, resume from sleep)
+    const ahead = internal.now();
+    assert.ok(Math.abs(stamp(ahead) - Date.now()) < 50, "re-anchored after a forward jump");
+    Date.now = () => realNow() - 10_000; // and back again
+    assert.ok(Math.abs(stamp(internal.now()) - Date.now()) < 50, "re-anchored after a backward jump");
+    Date.now = realNow;
+    const a = internal.now(); const b = internal.now();
+    assert.ok(b.ms > a.ms || (b.ms === a.ms && b.ns >= a.ns), "monotonic between jumps");
+    assert.ok(Math.abs(stamp(b) - Date.now()) < 50);
+  } finally {
+    Date.now = realNow;
+  }
+});

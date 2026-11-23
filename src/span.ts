@@ -3,8 +3,8 @@
  * dependency (Workers lack the Node APIs it needs, and it would add size to every bundle), so a
  * span is a small plain object that the transport encodes as OTLP JSON.
  *
- * Times are nanoseconds, like Python's: `performance.timeOrigin + performance.now()` where both exist
- * (microsecond resolution on Node), else `Date.now()`. A time is kept as whole milliseconds plus
+ * Times are nanoseconds, like Python's: `performance.now()` elapsed since a wall-clock anchor where it exists
+ * anchored to `Date.now()` (microsecond resolution on Node), else `Date.now()`. A time is kept as whole milliseconds plus
  * 0 to 999999 sub-millisecond nanoseconds, so the decimal `*UnixNano` string is built from integers
  * and never from a float times 1e6. The clock never goes backwards, so a child starts no earlier
  * than its parent and a span ends no earlier than it started. On Workers the platform clock only
@@ -30,21 +30,43 @@ export interface Time {
 }
 
 let last: Time = { ms: 0, ns: 0 };
+let anchor: { wall: number; perf: number } | null = null;
+const MAX_DRIFT_MS = 50;
 
-/** The current time, never earlier than the last one returned. */
+/**
+ * The current time: the wall clock at an anchor plus `performance.now()` elapsed since, for
+ * microsecond resolution. `performance.timeOrigin` is pinned to process start, so over hours it
+ * drifts from the wall clock (NTP steps, a laptop asleep); the anchor is taken again whenever it is
+ * more than 50 ms from `Date.now()`. Within a re-anchor the clock never goes backwards.
+ */
 export function now(): Time {
-  const perf = (globalThis as { performance?: { timeOrigin?: number; now?: () => number } }).performance;
+  const perf = (globalThis as { performance?: { now?: () => number } }).performance;
+  const wall = Date.now();
   let t: Time;
-  if (perf && typeof perf.timeOrigin === "number" && typeof perf.now === "function") {
-    const total = perf.timeOrigin + perf.now();
+  if (perf && typeof perf.now === "function") {
+    const elapsed = perf.now();
+    let reanchored = false;
+    if (!anchor || Math.abs(anchor.wall + (elapsed - anchor.perf) - wall) > MAX_DRIFT_MS) {
+      anchor = { wall, perf: elapsed };
+      reanchored = true;
+    }
+    const total = anchor.wall + (elapsed - anchor.perf);
     const ms = Math.floor(total);
     t = { ms, ns: Math.min(999_999, Math.floor((total - ms) * 1e6)) };
+    if (reanchored) {
+      last = t;
+      return t;
+    }
   } else {
-    t = { ms: Date.now(), ns: 0 };
+    t = { ms: wall, ns: 0 };
   }
   if (t.ms < last.ms || (t.ms === last.ms && t.ns < last.ns)) t = last;
   last = t;
   return t;
+}
+
+function isBefore(a: Time, b: Time): boolean {
+  return a.ms < b.ms || (a.ms === b.ms && a.ns < b.ns);
 }
 
 /** Decimal nanoseconds since the epoch (OTLP JSON writes uint64 as a string). */
@@ -77,7 +99,8 @@ export class Span {
     this.traceId = parent ? parent.traceId : randomHexId(16);
     this.spanId = randomHexId(8);
     this.parentSpanId = parent ? parent.spanId : null;
-    this.start = now();
+    const started = now();
+    this.start = parent && isBefore(started, parent.start) ? parent.start : started;
     this.finish = this.start;
     Object.assign(this.attributes, attributes);
   }
@@ -98,7 +121,8 @@ export class Span {
   end(): boolean {
     if (this.ended) return false;
     this.ended = true;
-    this.finish = now();
+    const ended = now();
+    this.finish = isBefore(ended, this.start) ? this.start : ended;
     return true;
   }
 }

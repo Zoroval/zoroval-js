@@ -2,3 +2,4 @@
 export * from "../src/entry.node.js";
 export { withTestMode } from "../src/context.js";
 export { sha256Hex, uuid7 } from "../src/util.js";
+export { now } from "../src/span.js";
