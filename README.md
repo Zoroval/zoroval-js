@@ -18,6 +18,17 @@ zoroval.init();
 
 Without a key, `init()` does nothing and your app runs as before.
 
+## OpenAI
+
+Wrap your OpenAI client once. Use it exactly as before: every chat completion and response becomes a span inside the
+current turn, with the model, token counts, messages and tool calls. Streaming works the same way.
+
+```ts
+import OpenAI from "openai";
+
+const openai = zoroval.wrapOpenAI(new OpenAI());
+```
+
 ## Conversations and turns
 
 Wrap the code that handles one chat message in `conversation()` and `turn()`. Every turn inside one
@@ -27,7 +38,11 @@ Wrap the code that handles one chat message in `conversation()` and `turn()`. Ev
 export async function handleMessage(chatId: string, userId: string, text: string) {
   return zoroval.conversation(chatId, { userId }, () =>
     zoroval.turn({ input: text }, async (turn) => {
-      const answer = await askModel(text);
+      const reply = await openai.chat.completions.create({
+        model: "gpt-5",
+        messages: [{ role: "user", content: text }],
+      });
+      const answer = reply.choices[0].message.content;
       turn.setOutput(answer);
       return answer;
     }));
@@ -36,7 +51,7 @@ export async function handleMessage(chatId: string, userId: string, text: string
 
 Both return whatever your function returns, and errors from your code pass through unchanged.
 
-Add detail inside a turn with `step()` and `tool()`:
+Add detail inside a turn with `step()` and `tool()`. A `tool()` run is matched to the tool call the model asked for:
 
 ```ts
 await zoroval.step("retrieve", async (step) => {
@@ -51,25 +66,56 @@ await zoroval.tool("get_weather", { arguments: { city } }, async (tool) => {
 `zoroval.trace("nightly-job", fn)` does the same for a run that is not a chat, such as an agent or a batch job.
 `setUser()`, `setTags()` and `setMetadata()` add details to the current turn.
 
-## Sending on Workers, Edge and short scripts
+## Plain `fetch`
 
-On Node.js, spans are sent in the background and when the process exits. On Cloudflare Workers and Vercel Edge,
-hand `flush()` to the platform so the response is not held up:
+If you call OpenAI with `fetch` instead of the `openai` package, use `wrapFetch()`. Calls to the OpenAI API are traced;
+every other call goes through untouched.
 
 ```ts
-// Cloudflare Workers
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    zoroval.init({ apiKey: env.ZOROVAL_INGEST_KEY });
-    const response = await handle(request);
-    ctx.waitUntil(zoroval.flush());
-    return response;
-  },
-};
+const tracedFetch = zoroval.wrapFetch();
+
+const response = await tracedFetch("https://api.openai.com/v1/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+  body: JSON.stringify({ model: "gpt-5", messages }),
+});
 ```
 
-Cloudflare Workers need the `nodejs_als` (or `nodejs_compat`) compatibility flag in `wrangler.toml` so that turns can be
-grouped into conversations.
+For an OpenAI-compatible endpoint, list its base URL: `zoroval.wrapFetch(fetch, { baseURLs: ["https://llm.example.com/v1"] })`.
+
+## Cloudflare Workers
+
+Wrap your exported handler. `withZoroval()` reads `ZOROVAL_INGEST_KEY` (and the other `ZOROVAL_*` settings) from your
+Worker's bindings and sends the trace after the response, including streamed responses.
+
+```ts
+export default zoroval.withZoroval({
+  async fetch(request: Request, env: Env) {
+    const openai = zoroval.wrapFetch();
+    // ... handle the request
+  },
+});
+```
+
+Add the `nodejs_als` (or `nodejs_compat`) compatibility flag to `wrangler.toml` so that turns can be grouped into
+conversations. Keep the key in a secret: `npx wrangler secret put ZOROVAL_INGEST_KEY`.
+
+## Next.js and Vercel
+
+On Node.js, spans are sent in the background and when the process exits. On serverless and edge routes, ask the platform
+to send them after the response:
+
+```ts
+import { after } from "next/server";
+import * as zoroval from "zoroval";
+
+export async function POST(request: Request) {
+  after(() => zoroval.flush());
+  // ... handle the request
+}
+```
+
+Outside Next.js on Vercel, use `waitUntil(zoroval.flush())` from `@vercel/functions`.
 
 `await zoroval.flush()` also works anywhere you want everything sent before moving on, and `await zoroval.shutdown()`
 sends what is left and stops.

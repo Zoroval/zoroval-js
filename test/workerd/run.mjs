@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KEY, startGateway } from "../gateway.mjs";
+import { startFakeOpenAI } from "../fake-openai.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -17,10 +18,11 @@ const project = mkdtempSync(join(tmpdir(), "zoroval-workerd-"));
 mkdirSync(join(project, "node_modules"));
 symlinkSync(root, join(project, "node_modules", "zoroval"), "dir");
 cpSync(fileURLToPath(new URL("./worker.mjs", import.meta.url)), join(project, "worker.mjs"));
+cpSync(fileURLToPath(new URL("./openai-worker.mjs", import.meta.url)), join(project, "openai-worker.mjs"));
 
-async function bundle(conditions) {
+async function bundle(conditions, entry = "worker.mjs") {
   const result = await build({
-    entryPoints: [join(project, "worker.mjs")],
+    entryPoints: [join(project, entry)],
     bundle: true, write: false, format: "esm", platform: "neutral", target: "es2022",
     conditions, mainFields: ["module", "main"],
     external: ["node:*"],
@@ -107,6 +109,52 @@ async function runWorker(flags, gatewayUrl, paths) {
     console.log("ok - workerd: no background timer, nothing sent until flush() is handed to waitUntil");
   } finally {
     await mf.dispose();
+    await gateway.close();
+  }
+}
+
+// 4. Check 2: a Worker calling OpenAI with plain fetch through wrapFetch and withZoroval.
+{
+  const gateway = await startGateway();
+  const fake = await startFakeOpenAI({ chunkDelayMs: 15 });
+  const mf = new Miniflare({
+    modules: [{ type: "ESModule", path: "worker.mjs", contents: await bundle(["workerd", "worker", "browser"], "openai-worker.mjs") }],
+    compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_als"],
+    bindings: { ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url, ZOROVAL_SERVICE_NAME: "openai-worker", OPENAI_BASE: fake.url },
+  });
+  try {
+    // two messages of one chat: one non-streamed (a tool call), one streamed and returned before it finishes
+    const first = await mf.dispatchFetch("http://worker.test/?chat=A");
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).choices[0].message.tool_calls[0].id, "call_abc123");
+    const second = await mf.dispatchFetch("http://worker.test/?chat=A&stream=1&model=gpt-test-big");
+    assert.equal(second.status, 200);
+    const text = await second.text();
+    assert.match(text, /\[DONE\]/, "the streamed body reached the client whole");
+    for (let i = 0; i < 100 && !gateway.spans().some((s) => s.attrs["zoroval.observation.type"] === "generation" && s.attrs["gen_ai.request.stream"] === true); i++) await new Promise((r) => setTimeout(r, 50));
+    const spans = gateway.spans();
+    const turns = spans.filter((s) => s.attrs["zoroval.observation.type"] === "turn");
+    const gens = spans.filter((s) => s.attrs["zoroval.observation.type"] === "generation");
+    assert.equal(turns.length, 2);
+    assert.ok(turns.every((t) => t.attrs["zoroval.conversation.id"] === "A" && t.attrs["zoroval.user.id"] === "u-A"));
+    assert.equal(gens.length, 2);
+    for (const g of gens) {
+      assert.equal(g.name, g.attrs["gen_ai.request.model"] === "gpt-test" ? "chat gpt-test" : "chat gpt-test-big");
+      assert.equal(g.attrs["zoroval.conversation.id"], "A");
+      assert.equal(g.attrs["gen_ai.response.id"], "chatcmpl-test123");
+      assert.ok(turns.some((t) => t.spanId === g.parentSpanId));
+    }
+    const streamed = gens.find((g) => g.attrs["gen_ai.request.stream"] === true);
+    const parts = JSON.parse(streamed.attrs["gen_ai.output.messages"])[0].parts[0].content;
+    assert.ok(parts.length > 10_000, "the whole streamed answer is in the span: the flush waited for the open stream");
+    assert.equal(streamed.attrs["gen_ai.response.finish_reasons"][0], "stop");
+    const plain = gens.find((g) => g.attrs["gen_ai.request.stream"] === false);
+    assert.equal(JSON.parse(plain.attrs["zoroval.tool_calls"])[0].id, "call_abc123");
+    assert.ok(gateway.requests.every((r) => r.headers["content-encoding"] === "gzip" && !r.parseError));
+    console.log(`ok - workerd OpenAI Worker: wrapFetch + withZoroval, ${turns.length} turns in one conversation, streamed and non-streamed spans arrived after the response (${gateway.requests.length} request(s))`);
+  } finally {
+    await mf.dispose();
+    await fake.close();
     await gateway.close();
   }
 }

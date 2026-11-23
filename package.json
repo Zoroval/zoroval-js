@@ -60,7 +60,8 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && tsup --config tsup.test.config.ts && node --test test/*.test.mjs",
     "test:workerd": "npm run build && node test/workerd/run.mjs",
-    "size": "npm run build && node scripts/size.mjs"
+    "size": "npm run build && node scripts/size.mjs",
+    "test:next": "node test/nextjs/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
