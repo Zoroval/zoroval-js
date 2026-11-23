@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test, afterEach, before, after } from "node:test";
-import OpenAI from "openai";
+import { OpenAI } from "./openai-packages.mjs";
 import * as zoroval from "../dist/node.js";
 import { KEY, startGateway } from "./gateway.mjs";
 import { startFakeOpenAI } from "./fake-openai.mjs";

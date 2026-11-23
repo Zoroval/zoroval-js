@@ -26,3 +26,6 @@ jobs:
       # Miniflare (the workerd runner) needs Node 22 or newer; the Node 18 and 20 jobs cover the Node entries.
       - if: matrix.node == 22
         run: npm run test:workerd
+      # A real Next.js app (Node and Edge routes) using the packed package; installs Next, so it runs once.
+      - if: matrix.node == 22
+        run: npm run test:next

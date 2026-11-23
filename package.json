@@ -68,6 +68,7 @@
     "esbuild": "^0.28.2",
     "miniflare": "^4.20260730.0",
     "openai": "^7.62.0",
+    "openai-v5": "npm:openai@^5.23.2",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   },

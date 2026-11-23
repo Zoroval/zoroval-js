@@ -14,6 +14,13 @@
  * return value is not captured as output (call `obs.setOutput()`), so nothing is sent unasked.
  * Without AsyncLocalStorage (a Worker missing `nodejs_als`) turns stay ungrouped, never mixed.
  * Conversation-level metadata is applied to each root span (Python stores it but never sends it).
+ *
+ * Added for the OpenAI integrations (integrations/): `startGeneration()` opens a generation span under
+ * the current span, the counterpart of Python's `Generation.__init__`; every open generation counts as
+ * open work for flush(). `tool()` links a call that the model registered after the tool started or
+ * ended (a streamed reply is read in the background), which Python never needs because it registers
+ * before `create()` returns. `recordError` names the error by its class when `name` is the default
+ * "Error" (openai's `RateLimitError`), the way Python records `__qualname__`.
  */
 
 import { capture as captureValue, dumps, fit, toPlain } from "./json.js";

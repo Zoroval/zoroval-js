@@ -1,7 +1,7 @@
 // wrapFetch with plain fetch against the local fake OpenAI API, and the 2G check.
 import assert from "node:assert/strict";
 import { test, afterEach, before, after } from "node:test";
-import OpenAI from "openai";
+import { OpenAI } from "./openai-packages.mjs";
 import * as zoroval from "../dist/node.js";
 import { KEY, startGateway } from "./gateway.mjs";
 import { startFakeOpenAI, BIG_CHUNKS, BIG_CHUNK_TEXT } from "./fake-openai.mjs";
