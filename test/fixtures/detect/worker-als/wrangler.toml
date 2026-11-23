@@ -1,0 +1,7 @@
+name = "edge-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = [
+  "streams_enable_constructors", # keep
+  "nodejs_als",
+]

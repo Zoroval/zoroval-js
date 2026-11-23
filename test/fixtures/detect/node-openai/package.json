@@ -1,0 +1,6 @@
+{
+  "name": "node-bot",
+  "type": "module",
+  "dependencies": { "openai": "^5.0.0", "dotenv": "^16.4.0" },
+  "devDependencies": { "typescript": "^5.6.0" }
+}

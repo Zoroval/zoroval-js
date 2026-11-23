@@ -1,0 +1,13 @@
+[tool.poetry]
+name = "edge"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langchain = { version = "^0.2", extras = ["x"] }
+Traceloop-SDK = "^0.30"
+openinference-instrumentation-openai = "*"
+openai = "^1.40"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8"
+langsmith = ">=0.1"

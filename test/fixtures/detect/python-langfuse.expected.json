@@ -1,0 +1,114 @@
+{
+  "root": "<root>",
+  "services": [
+    {
+      "path": ".",
+      "kind": "python",
+      "manifest": "requirements.txt"
+    }
+  ],
+  "packages": {
+    "python": {
+      "langfuse": ">=3.0",
+      "openai": ""
+    },
+    "typescript": {}
+  },
+  "imports": {
+    "langfuse": [
+      "chat.py"
+    ],
+    "langfuse.openai": [
+      "chat.py"
+    ]
+  },
+  "llm_calls": [
+    {
+      "file": "chat.py",
+      "line": 7,
+      "provider": "openai",
+      "api": "chat.completions.create"
+    }
+  ],
+  "tracing": {
+    "code_signals": [
+      {
+        "file": "chat.py",
+        "line": 6,
+        "signal": "langfuse_observe"
+      }
+    ],
+    "openai": true,
+    "anthropic": false,
+    "langfuse": {
+      "spec": ">=3.0",
+      "major": 3,
+      "otel_based": true,
+      "openai_wrapper": true
+    },
+    "otel": {
+      "sdk": false,
+      "contrib_instrumentors": [],
+      "collector_configs": []
+    }
+  },
+  "entry_points": [],
+  "chat_id_candidates": [
+    {
+      "file": "chat.py",
+      "line": 6,
+      "name": "conversation_id"
+    }
+  ],
+  "servers": {},
+  "serverless": [],
+  "env": {
+    "ZOROVAL_INGEST_KEY": "absent",
+    "env_files": [
+      {
+        "path": ".env",
+        "symlink": false,
+        "tracked": false,
+        "ignored": true,
+        "names": [
+          "OPENAI_API_KEY",
+          "LANGFUSE_HOST",
+          "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ]
+      },
+      {
+        "path": ".env.example",
+        "symlink": false,
+        "tracked": false,
+        "ignored": false,
+        "names": [
+          "OPENAI_API_KEY"
+        ]
+      }
+    ],
+    "dotenv_loader": false,
+    "vendor_vars": [
+      "LANGFUSE_HOST",
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ],
+    "repo_is_git": true
+  },
+  "deploy_files": [],
+  "ci_files": [],
+  "collector_configs": [],
+  "secrets_managers": [],
+  "typescript": {
+    "signals": []
+  },
+  "cases": [
+    2,
+    9
+  ],
+  "explain_only": [],
+  "notes": [],
+  "plan": [
+    "Add `zoroval` to the Python dependencies.",
+    "Add `import zoroval` and `zoroval.init()` after the existing tracing setup (at the app entry); it attaches to the existing provider.",
+    "Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`."
+  ]
+}

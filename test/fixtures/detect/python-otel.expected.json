@@ -1,0 +1,118 @@
+{
+  "root": "<root>",
+  "services": [
+    {
+      "path": ".",
+      "kind": "python",
+      "manifest": "requirements.txt"
+    }
+  ],
+  "packages": {
+    "python": {
+      "anthropic": "",
+      "openai": "",
+      "opentelemetry-instrumentation-openai-v2": "",
+      "opentelemetry-sdk": "==1.30.0"
+    },
+    "typescript": {}
+  },
+  "imports": {
+    "anthropic": [
+      "tracing.py"
+    ],
+    "opentelemetry": [
+      "tracing.py"
+    ]
+  },
+  "llm_calls": [
+    {
+      "file": "tracing.py",
+      "line": 8,
+      "provider": "anthropic",
+      "api": "messages.create"
+    }
+  ],
+  "tracing": {
+    "code_signals": [
+      {
+        "file": "tracing.py",
+        "line": 5,
+        "signal": "otel_provider"
+      },
+      {
+        "file": "tracing.py",
+        "line": 6,
+        "signal": "otel_set_provider"
+      }
+    ],
+    "openai": true,
+    "anthropic": true,
+    "otel": {
+      "sdk": true,
+      "contrib_instrumentors": [
+        "opentelemetry-instrumentation-openai-v2"
+      ],
+      "collector_configs": []
+    }
+  },
+  "entry_points": [],
+  "chat_id_candidates": [
+    {
+      "file": "tracing.py",
+      "line": 8,
+      "name": "threadId"
+    }
+  ],
+  "servers": {},
+  "serverless": [],
+  "env": {
+    "ZOROVAL_INGEST_KEY": "absent",
+    "env_files": [
+      {
+        "path": ".env",
+        "symlink": false,
+        "tracked": false,
+        "ignored": true,
+        "names": [
+          "OPENAI_API_KEY",
+          "LANGFUSE_HOST",
+          "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ]
+      },
+      {
+        "path": ".env.example",
+        "symlink": false,
+        "tracked": false,
+        "ignored": false,
+        "names": [
+          "OPENAI_API_KEY"
+        ]
+      }
+    ],
+    "dotenv_loader": false,
+    "vendor_vars": [
+      "LANGFUSE_HOST",
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ],
+    "repo_is_git": true
+  },
+  "deploy_files": [],
+  "ci_files": [],
+  "collector_configs": [],
+  "secrets_managers": [],
+  "typescript": {
+    "signals": []
+  },
+  "cases": [
+    3,
+    9
+  ],
+  "explain_only": [],
+  "notes": [],
+  "plan": [
+    "Add `zoroval` to the Python dependencies.",
+    "Add `import zoroval` and `zoroval.init()` after the existing tracing setup (at the app entry); it attaches to the existing provider.",
+    "Wrap each chat turn in `with zoroval.conversation(threadId):` (candidate at tracing.py:8).",
+    "Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`."
+  ]
+}

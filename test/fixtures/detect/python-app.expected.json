@@ -1,0 +1,229 @@
+{
+  "root": "<root>",
+  "services": [
+    {
+      "path": ".",
+      "kind": "python",
+      "manifest": "pyproject.toml"
+    }
+  ],
+  "packages": {
+    "python": {
+      "celery": "",
+      "fastapi": "==0.110.0",
+      "gunicorn": ">=21",
+      "openai": ">=1.40",
+      "pytest": ">=8",
+      "pytest-asyncio": ">=0.23",
+      "python-dotenv": ""
+    },
+    "typescript": {}
+  },
+  "imports": {
+    "celery": [
+      "app/worker.py"
+    ],
+    "dotenv": [
+      "app/main.py"
+    ],
+    "fastapi": [
+      "app/main.py"
+    ],
+    "openai": [
+      "app/main.py"
+    ],
+    "os": [
+      "app/main.py"
+    ],
+    "uvicorn": [
+      "app/main.py"
+    ]
+  },
+  "llm_calls": [
+    {
+      "file": "app/main.py",
+      "line": 15,
+      "provider": "openai",
+      "api": "chat.completions.create"
+    },
+    {
+      "file": "app/main.py",
+      "line": 16,
+      "provider": "openai",
+      "api": "responses.create"
+    },
+    {
+      "file": "src/pkg/chat.py",
+      "line": 6,
+      "provider": "openai",
+      "api": "chat.completions.stream"
+    }
+  ],
+  "tracing": {
+    "code_signals": [
+      {
+        "file": "app/main.py",
+        "line": 6,
+        "signal": "dotenv"
+      },
+      {
+        "file": "app/worker.py",
+        "line": 3,
+        "signal": "celery"
+      }
+    ],
+    "openai": true,
+    "anthropic": false,
+    "otel": {
+      "sdk": false,
+      "contrib_instrumentors": [],
+      "collector_configs": [
+        "otel-collector-config.yaml"
+      ]
+    }
+  },
+  "entry_points": [
+    {
+      "file": "handler.py",
+      "line": 1,
+      "kind": "lambda_handler"
+    },
+    {
+      "file": "app/main.py",
+      "line": 7,
+      "kind": "FastAPI"
+    }
+  ],
+  "chat_id_candidates": [
+    {
+      "file": "app/main.py",
+      "line": 12,
+      "name": "chat_id"
+    },
+    {
+      "file": "app/main.py",
+      "line": 12,
+      "name": "thread_id"
+    },
+    {
+      "file": "app/main.py",
+      "line": 14,
+      "name": "session_id"
+    },
+    {
+      "file": "app/main.py",
+      "line": 16,
+      "name": "conversation_id"
+    },
+    {
+      "file": "app/main.py",
+      "line": 17,
+      "name": "chat_id"
+    },
+    {
+      "file": "src/pkg/chat.py",
+      "line": 2,
+      "name": "session_id"
+    },
+    {
+      "file": "src/pkg/chat.py",
+      "line": 3,
+      "name": "session_id"
+    }
+  ],
+  "servers": {
+    "gunicorn": {
+      "preload": true,
+      "workers": true
+    },
+    "celery": true
+  },
+  "serverless": [
+    {
+      "kind": "aws_lambda",
+      "file": "handler.py"
+    },
+    {
+      "kind": "vercel_python",
+      "file": "vercel.json"
+    }
+  ],
+  "env": {
+    "ZOROVAL_INGEST_KEY": "absent",
+    "env_files": [
+      {
+        "path": ".env",
+        "symlink": false,
+        "tracked": false,
+        "ignored": true,
+        "names": [
+          "OPENAI_API_KEY",
+          "LANGFUSE_HOST",
+          "OTEL_EXPORTER_OTLP_ENDPOINT"
+        ]
+      },
+      {
+        "path": ".env.example",
+        "symlink": false,
+        "tracked": false,
+        "ignored": false,
+        "names": [
+          "OPENAI_API_KEY"
+        ]
+      }
+    ],
+    "dotenv_loader": true,
+    "vendor_vars": [
+      "LANGFUSE_HOST",
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ],
+    "repo_is_git": true
+  },
+  "deploy_files": [
+    "Dockerfile",
+    "docker-compose.yml",
+    "vercel.json"
+  ],
+  "ci_files": [
+    ".github/workflows/ci.yml"
+  ],
+  "collector_configs": [
+    "otel-collector-config.yaml"
+  ],
+  "secrets_managers": [
+    "doppler"
+  ],
+  "typescript": {
+    "signals": []
+  },
+  "cases": [
+    3,
+    7,
+    9
+  ],
+  "explain_only": [],
+  "notes": [
+    "Several possible conversation ids (chat_id, conversation_id, session_id, thread_id): ask the user which one."
+  ],
+  "plan": [
+    "Add `zoroval` to the Python dependencies.",
+    "Add `import zoroval` and `zoroval.init()` after the existing tracing setup (in handler.py); it attaches to the existing provider.",
+    "Wrap each chat turn in `with zoroval.conversation(chat_id):` (candidate at app/main.py:12).",
+    "Call `zoroval.flush()` at the end of each serverless handler.",
+    "Pre-fork servers: nothing extra; the SDK restarts its export thread after fork.",
+    "Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`.",
+    "Production: make a deploy key in the app and set ZOROVAL_INGEST_KEY in the host's secret settings yourself; the skill writes nothing there."
+  ],
+  "routes": [
+    {
+      "file": "app/main.py",
+      "line": 12,
+      "function": "chat"
+    },
+    {
+      "file": "app/main.py",
+      "line": 21,
+      "function": "health"
+    }
+  ]
+}
