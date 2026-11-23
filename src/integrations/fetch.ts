@@ -120,9 +120,14 @@ async function readEvents(body: ReadableStream<Uint8Array>, onEvent: (event: Jso
   if (buffer.trim()) dispatch(buffer);
 }
 
-function observeResponse(response: Response, gen: Generation, api: Api): void {
+/**
+ * Read our copy of the response. Returns a promise that settles when the span is finished, and
+ * whether the body is a stream: a stream is read in the background, anything else the caller waits for.
+ */
+function observeResponse(response: Response, gen: Generation, api: Api): { stream: boolean; done: Promise<void> } {
   const copy = response.clone();
-  void (async () => {
+  const stream = response.ok && (response.headers.get("content-type") ?? "").includes("text/event-stream") && Boolean(copy.body);
+  const done = (async () => {
     try {
       if (!response.ok) {
         let message = "";
@@ -137,11 +142,11 @@ function observeResponse(response: Response, gen: Generation, api: Api): void {
         gen.set("error.type", String(type ?? response.status));
         gen.setError(`${response.status} ${message}`.trim());
         gen.finish();
-      } else if ((response.headers.get("content-type") ?? "").includes("text/event-stream") && copy.body) {
+      } else if (stream) {
         const state = streamState(gen, api);
         let failure: unknown;
         try {
-          await readEvents(copy.body, (event) => {
+          await readEvents(copy.body!, (event) => {
             gen.markFirstChunk();
             try {
               state.observe(event);
@@ -163,6 +168,7 @@ function observeResponse(response: Response, gen: Generation, api: Api): void {
       gen.finish();
     }
   })();
+  return { stream, done };
 }
 
 /**
@@ -200,7 +206,10 @@ async function traced(base: FetchFn, hit: Match, input: RequestInfo | URL, init:
     throw error;
   }
   try {
-    observeResponse(response, gen, hit.api);
+    // A complete body is read before the response is handed back: the app waits for it anyway, and
+    // the tool calls it holds are then known when the app's own code runs. A stream is read as it flows.
+    const seen = observeResponse(response, gen, hit.api);
+    if (!seen.stream) await seen.done;
   } catch (error) {
     internalError("fetch.clone", error);
     gen.finish();

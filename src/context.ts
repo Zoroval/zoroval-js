@@ -251,6 +251,8 @@ class PendingCalls {
   static readonly TTL_MS = 600_000;
   static readonly LIMIT = 1024;
   private items: PendingCall[] = [];
+  /** Tool runs that ended before the model's call was registered (a streamed reply is read in the background). */
+  private orphans: { span: Span; name: string; args: unknown; traceId: string; conversation: string | null; at: number }[] = [];
 
   add(calls: readonly { id?: string; name?: string; arguments?: unknown }[], traceId: string, conversation: string | null): void {
     const now = Date.now();
@@ -260,6 +262,23 @@ class PendingCalls {
       }
     }
     this.prune(now);
+    this.link(now);
+  }
+
+  /** Remember a finished tool run that found no call to link to; a later registration may fill it in. */
+  orphan(span: Span, name: string, args: unknown, traceId: string, conversation: string | null): void {
+    this.orphans.push({ span, name, args, traceId, conversation, at: Date.now() });
+    this.orphans = this.orphans.slice(-256);
+  }
+
+  private link(now: number): void {
+    if (!this.orphans.length) return;
+    this.orphans = this.orphans.filter((o) => {
+      const id = this.claim(o.name, o.args, o.traceId, o.conversation);
+      if (id === null) return now - o.at < PendingCalls.TTL_MS;
+      o.span.attributes["gen_ai.tool.call.id"] = id; // the span has ended but is still queued
+      return false;
+    });
   }
 
   private prune(now: number): void {
@@ -281,6 +300,7 @@ class PendingCalls {
 
   clear(): void {
     this.items = [];
+    this.orphans = [];
   }
 }
 
@@ -408,6 +428,8 @@ interface SpanSpec {
 }
 
 interface Started {
+  /** Set for a tool with no explicit call id: what to claim again when the tool ends. */
+  claim?: { name: string; args: unknown };
   obs: Observation;
   store: Store;
   span: Span;
@@ -449,12 +471,14 @@ function startSpan(spec: SpanSpec): Started | null {
   }
   const span = new Span(name, KIND_INTERNAL, store.span, attrs);
   const obs = new Observation(span, kind, isRoot, scope?.id ?? null);
+  let claim: Started["claim"];
   if (isRoot) obs.inherited = scope === null && GEN_AI_CONVERSATION_ID in attrs;
   const metadata = isRoot ? { ...(scope?.metadata ?? {}), ...(spec.metadata ?? {}) } : spec.metadata;
   if (metadata && Object.keys(metadata).length) obs.setMetadata(metadata);
   if (kind === "tool") {
     const callId = spec.callId ?? PENDING.claim(spec.name ?? "", spec.arguments, span.traceId, scope?.id ?? null);
     if (callId) span.setAttribute("gen_ai.tool.call.id", String(callId));
+    else if (spec.callId === undefined) claim = { name: spec.name ?? "", args: spec.arguments };
     if (spec.captureInput !== false && spec.arguments !== undefined && spec.arguments !== null) {
       setContent(obs, "gen_ai.tool.call.arguments", spec.arguments);
     }
@@ -462,13 +486,20 @@ function startSpan(spec: SpanSpec): Started | null {
     setContent(obs, INPUT, spec.input);
   }
   if (isRoot) state.processor.rootStarted();
-  return { obs, span, store: { conversation: scope, root: isRoot ? obs : store.root, span, test: store.test } };
+  return { obs, span, claim, store: { conversation: scope, root: isRoot ? obs : store.root, span, test: store.test } };
 }
 
 function finishSpan(started: Started, error: unknown, failed: boolean): void {
   const { span, obs } = started;
   try {
     if (failed) recordError(span, error);
+    // A streamed reply registers its tool calls when it ends, which can be after the tool started or ended.
+    if (obs.kind === "tool" && !("gen_ai.tool.call.id" in span.attributes) && started.claim) {
+      const { name, args } = started.claim;
+      const callId = PENDING.claim(name, args, span.traceId, obs.conversationId);
+      if (callId) span.setAttribute("gen_ai.tool.call.id", String(callId));
+      else PENDING.orphan(span, name, args, span.traceId, obs.conversationId);
+    }
     if (obs.isRoot) span.setAttribute(GROUPING, groupingOf(obs));
     if (span.end()) getState()?.processor.onEnd(span);
   } catch (inner) {

@@ -41,5 +41,5 @@ test("the CommonJS build works with require()", () => {
   const result = JSON.parse(out);
   assert.equal(result.r, 42);
   assert.equal(result.init, false);
-  assert.deepEqual(result.keys, ["Observation", "VERSION", "conversation", "currentObservation", "flush", "init", "setMetadata", "setTags", "setUser", "shutdown", "status", "step", "tool", "trace", "turn"]);
+  assert.deepEqual(result.keys, ["Observation", "VERSION", "conversation", "currentObservation", "flush", "init", "setMetadata", "setTags", "setUser", "shutdown", "status", "step", "tool", "trace", "turn", "withZoroval", "wrapFetch", "wrapOpenAI"]);
 });

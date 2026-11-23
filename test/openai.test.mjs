@@ -344,3 +344,40 @@ test("data URLs in image content become a placeholder, plain URLs are kept", asy
   assert.ok(!g.attrs["gen_ai.input.messages"].includes("AAAA"));
   await gateway.close();
 });
+
+test("tee() and toReadableStream() on the library's stream: the app reads unchanged, one span, content complete", async () => {
+  const gateway = await setup();
+  const openai = zoroval.wrapOpenAI(client());
+  await zoroval.conversation("t1", async () => {
+    await zoroval.turn({}, async () => {
+      const stream = await openai.chat.completions.create({ model: "gpt-test", stream: true, messages: [{ role: "user", content: "tee me now" }] });
+      const [left, right] = stream.tee();
+      const read = async (s) => { let t = ""; for await (const c of s) t += c.choices[0]?.delta?.content ?? ""; return t; };
+      const [a, b] = await Promise.all([read(left), read(right)]);
+      assert.equal(a, "You said: tee me now");
+      assert.equal(b, a);
+      const again = await openai.chat.completions.create({ model: "gpt-test", stream: true, messages: [{ role: "user", content: "as readable" }] });
+      const bytes = await new Response(again.toReadableStream()).text();
+      assert.match(bytes, /"content":"readable"/);
+    });
+  });
+  await zoroval.flush(3000);
+  const g = gens(gateway).sort((x, y) => x.startTimeUnixNano.localeCompare(y.startTimeUnixNano));
+  assert.equal(g.length, 2);
+  assert.equal(parsed(g[0].attrs["gen_ai.output.messages"])[0].parts[0].content, "You said: tee me now");
+  assert.equal(parsed(g[1].attrs["gen_ai.output.messages"])[0].parts[0].content, "You said: as readable");
+  await gateway.close();
+});
+
+test("a streamed tool call from the openai package links the next tool() run", async () => {
+  const gateway = await setup();
+  const openai = zoroval.wrapOpenAI(client());
+  await zoroval.conversation("t2", () => zoroval.turn({}, async () => {
+    const stream = await openai.chat.completions.create({ model: "gpt-test", stream: true, messages: [{ role: "user", content: "weather?" }] });
+    for await (const chunk of stream) void chunk;
+    zoroval.tool("get_weather", {}, () => "22C");
+  }));
+  await zoroval.flush(3000);
+  assert.equal(gateway.spans().find((s) => s.name === "execute_tool get_weather").attrs["gen_ai.tool.call.id"], "call_abc123");
+  await gateway.close();
+});
