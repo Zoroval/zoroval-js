@@ -198,6 +198,8 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
       signal?.removeEventListener("abort", onAbort);
       resolve(false);
     }, Math.max(ms, 0));
+    // In an app, a retry or backoff wait never keeps the process alive. (The CLI waits for real.)
+    if (RUNTIME.processHooks) (timer as { unref?: () => void }).unref?.();
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

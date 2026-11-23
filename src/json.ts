@@ -36,12 +36,15 @@ export function dumps(value: unknown): string {
   } catch {
     // Circular reference (or a throwing toJSON): replace repeated objects instead of failing.
     try {
-      const seen = new WeakSet<object>();
+      // Only an object that contains itself is circular: track the ancestors of the value being written
+      // (`this` is the object holding it), so an object that is merely shared twice is written twice.
+      const ancestors: object[] = [];
       const text = JSON.stringify(value, function (key, item) {
         const plain = replacer.call(this, key, item);
         if (plain !== null && typeof plain === "object") {
-          if (seen.has(plain as object)) return "[Circular]";
-          seen.add(plain as object);
+          while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+          if (ancestors.includes(plain as object)) return "[Circular]";
+          ancestors.push(plain as object);
         }
         return plain;
       });

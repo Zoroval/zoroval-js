@@ -47,7 +47,7 @@ function installProcessHooks(): void {
   hooksInstalled = true;
   beforeExitHandler = () => {
     const state = getState();
-    if (state && state.processor.queueState().queueSpans > 0) void state.processor.flush(state.cfg.shutdownTimeoutMs);
+    if (state && state.processor.queueState().queueSpans > 0) void state.processor.flushForExit(state.cfg.shutdownTimeoutMs);
   };
   sigtermHandler = () => {
     const state = getState();
@@ -62,7 +62,7 @@ function installProcessHooks(): void {
       }
     };
     if (!state) return finish();
-    void state.processor.flush(state.cfg.shutdownTimeoutMs).then(finish, finish);
+    void state.processor.flushForExit(state.cfg.shutdownTimeoutMs).then(finish, finish);
   };
   proc.on("beforeExit", beforeExitHandler);
   proc.on("SIGTERM", sigtermHandler);

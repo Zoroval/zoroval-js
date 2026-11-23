@@ -59,6 +59,7 @@ export async function startGateway(behaviour = () => ({})) {
     res.end(payload);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  server.unref(); // a failing test must end the run, not leave a listening server holding it open
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
     url,

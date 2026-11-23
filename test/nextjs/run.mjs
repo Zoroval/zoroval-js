@@ -11,6 +11,9 @@ import { fileURLToPath } from "node:url";
 import { KEY, startGateway } from "../gateway.mjs";
 import { startFakeOpenAI } from "../fake-openai.mjs";
 
+// Whatever hangs, this ends the run with a message instead of the CI job's own timeout.
+setTimeout(() => { console.error("test:next did not finish within 10 minutes"); process.exit(1); }, 600_000).unref();
+
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const work = mkdtempSync(join(tmpdir(), "zoroval-next-"));
 const app = join(work, "app");
@@ -27,17 +30,26 @@ run("npx", ["next", "build"], app, { NEXT_TELEMETRY_DISABLED: "1" });
 const port = await new Promise((resolve) => { const s = createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 const gateway = await startGateway();
 const fake = await startFakeOpenAI({ chunkDelayMs: 5 });
-const server = spawn("npx", ["next", "start", "-p", String(port)], {
-  cwd: app, stdio: ["ignore", "pipe", "pipe"],
+// Next is started with node itself, in its own process group. Through `npx` (a shell and a wrapper) a
+// SIGTERM reached only the wrapper on Linux: `next start` stayed alive holding our pipes and the run never ended.
+const server = spawn(process.execPath, [join(app, "node_modules", "next", "dist", "bin", "next"), "start", "-p", String(port)], {
+  cwd: app, stdio: ["ignore", "pipe", "pipe"], detached: true,
   env: { ...process.env, NEXT_TELEMETRY_DISABLED: "1", ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url, OPENAI_BASE: fake.url, ZOROVAL_SERVICE_NAME: "next-fixture" },
 });
 let log = "";
 server.stdout.on("data", (d) => (log += d));
 server.stderr.on("data", (d) => (log += d));
+let exited = false;
+server.on("exit", () => { exited = true; });
 try {
-  for (let i = 0; i < 200 && !/Ready|started server/i.test(log); i++) await new Promise((r) => setTimeout(r, 100));
+  const readyBy = Date.now() + 60_000;
+  while (!/Ready|started server/i.test(log)) {
+    if (exited) throw new Error("next start exited before it was ready");
+    if (Date.now() > readyBy) throw new Error("next start was not ready after 60 s");
+    await new Promise((r) => setTimeout(r, 100));
+  }
   const post = async (path, body) => {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     return { status: response.status, text: await response.text() };
   };
   for (const [route, chat] of [["node", "N"], ["edge", "E"]]) {
@@ -72,8 +84,16 @@ try {
   console.error("--- next server log ---\n" + log.slice(-4000));
   throw error;
 } finally {
-  server.kill("SIGTERM");
+  // the whole process group, then a hard kill if it ignores the first signal
+  const stop = (signal) => { try { process.kill(-server.pid, signal); } catch { /* already gone */ } };
+  stop("SIGTERM");
+  const gone = new Promise((resolve) => (exited ? resolve() : server.once("exit", resolve)));
+  await Promise.race([gone, new Promise((r) => setTimeout(r, 5000))]);
+  stop("SIGKILL");
+  server.stdout.destroy();
+  server.stderr.destroy();
   await fake.close();
   await gateway.close();
   rmSync(work, { recursive: true, force: true });
 }
+process.exit(0);

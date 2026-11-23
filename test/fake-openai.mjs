@@ -123,6 +123,7 @@ export async function startFakeOpenAI(options = {}) {
     res.end(JSON.stringify({ error: { message: `no route ${path}`, type: "invalid_request_error" } }));
   });
   await new Promise((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
+  server.unref(); // a failing test must end the run, not leave a listening server holding it open
   const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}/v1`,

@@ -37,3 +37,28 @@ test("SIGTERM with the app's own handler: flush, and the app decides when to exi
   assert.equal(gateway.spans().length, 1);
   await gateway.close();
 });
+
+// An unreachable ingest URL must not hold the process open: the exit flush is bounded and then stops retrying.
+function runUnreachable(mode, onReady) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [new URL("./exit-child.mjs", import.meta.url).pathname, mode, "http://127.0.0.1:9", KEY], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; if (out.includes("ready") && onReady) { onReady(child); onReady = null; } });
+    child.on("exit", (code, signal) => resolve({ code, signal, ms: Date.now() - started }));
+    setTimeout(() => child.kill("SIGKILL"), 30_000).unref();
+  });
+}
+
+test("a script that ends while the ingest URL is unreachable exits within the shutdown timeout, not minutes later", async () => {
+  const { code, signal, ms } = await runUnreachable("natural");
+  assert.equal(signal, null, "it was not killed by the test's own timeout");
+  assert.equal(code, 0);
+  assert.ok(ms < 9000, `exited after ${ms} ms`);
+});
+
+test("SIGTERM with an unreachable ingest URL: bounded flush, then the default exit", async () => {
+  const { signal, ms } = await runUnreachable("sigterm", (child) => setTimeout(() => child.kill("SIGTERM"), 200));
+  assert.equal(signal, "SIGTERM");
+  assert.ok(ms < 9000, `exited after ${ms} ms`);
+});

@@ -124,7 +124,7 @@ async function readEvents(body: ReadableStream<Uint8Array>, onEvent: (event: Jso
  * Read our copy of the response. Returns a promise that settles when the span is finished, and
  * whether the body is a stream: a stream is read in the background, anything else the caller waits for.
  */
-function observeResponse(response: Response, gen: Generation, api: Api): { stream: boolean; done: Promise<void> } {
+function observeResponse(response: Response, gen: Generation, api: Api, signal?: AbortSignal | null): { stream: boolean; done: Promise<void> } {
   const copy = response.clone();
   const stream = response.ok && (response.headers.get("content-type") ?? "").includes("text/event-stream") && Boolean(copy.body);
   const done = (async () => {
@@ -157,7 +157,9 @@ function observeResponse(response: Response, gen: Generation, api: Api): { strea
             if (error) failure = Object.assign(new Error(String(get(error, "message") ?? "stream error")), { name: String(get(error, "type") ?? "APIError") });
           });
         } catch (error) {
-          failure = error;
+          // The app aborted the request: that is not a provider failure. (Node 18 rejects our half of the
+          // tee with a plain object, not an AbortError, so the app's own signal is the thing to look at.)
+          failure = signal?.aborted ? Object.assign(new Error("aborted"), { name: "AbortError" }) : error;
         }
         state.finish(failure);
       } else {
@@ -208,7 +210,8 @@ async function traced(base: FetchFn, hit: Match, input: RequestInfo | URL, init:
   try {
     // A complete body is read before the response is handed back: the app waits for it anyway, and
     // the tool calls it holds are then known when the app's own code runs. A stream is read as it flows.
-    const seen = observeResponse(response, gen, hit.api);
+    const signal = init?.signal ?? (typeof Request !== "undefined" && input instanceof Request ? input.signal : undefined);
+    const seen = observeResponse(response, gen, hit.api, signal);
     if (!seen.stream) await seen.done;
   } catch (error) {
     internalError("fetch.clone", error);

@@ -27,6 +27,7 @@ import { WIRE_MARGIN, Transport } from "./transport.js";
 import { addCount, guard, internalError, logOnce, sha256, sleep, uuid7 } from "./util.js";
 
 const BATCH_BUDGET_MS = 30_000; // retries for one batch; grows to 1.5 request timeouts for big bodies
+const MAX_OPEN_WAIT_MS = 10_000; // longest a flush waits for open turns
 const MAX_REQUEUES = 10; // a failing batch goes back to the queue at most this many times
 const MIN_BATCH_BYTES = 64 * 1024; // timeouts halve the batch size down to this
 const GROW_AFTER_OK = 4; // sends in a row before a halved batch size doubles again
@@ -76,6 +77,7 @@ class Batch {
 
 export class Processor {
   private queue: Item[] = [];
+  private heldUntil = 0; // when the earliest held span is released (set by takeBatch)
   private retry: Batch[] = []; // batches put back; older than everything in `queue`
   private retrySpans = 0;
   private queueBytes = 0; // both lists
@@ -246,16 +248,27 @@ export class Processor {
       this.queueBytes -= batch.size;
       return batch;
     }
-    let count = 0;
+    // A tool run still waiting to be linked to its streamed tool call stays queued until its grace
+    // (a fraction of a second) ends, a flush too: only a deadline that is about to pass sends it as it is.
+    const now = nowMs();
+    const releaseAll = this.hardDeadline() - now < 500;
+    this.heldUntil = 0;
+    const taken: number[] = [];
     let size = 0;
-    while (count < this.queue.length && count < this.cfg.maxBatchSpans) {
-      const item = this.queue[count]!;
-      if (count && size + item.size > this.batchLimit) break;
+    for (let at = 0; at < this.queue.length && taken.length < this.cfg.maxBatchSpans; at++) {
+      const item = this.queue[at]!;
+      if (!releaseAll && item.span.holdUntil > now) {
+        this.heldUntil = this.heldUntil ? Math.min(this.heldUntil, item.span.holdUntil) : item.span.holdUntil;
+        continue;
+      }
+      if (taken.length && size + item.size > this.batchLimit) break;
       size += item.size;
-      count += 1;
+      taken.push(at);
     }
-    if (!count) return null;
-    const items = this.queue.splice(0, count);
+    if (!taken.length) return null;
+    const items = taken.map((at) => this.queue[at]!);
+    const gone = new Set(taken);
+    this.queue = this.queue.filter((_, at) => !gone.has(at));
     this.queueBytes -= size;
     return new Batch(items, uuid7());
   }
@@ -277,7 +290,14 @@ export class Processor {
         continue;
       }
       const batch = this.takeBatch();
-      if (!batch) return;
+      if (!batch) {
+        // only held spans are left: a flush or shutdown waits out the grace, the background timer comes back by itself
+        if (this.queue.length && (this.flushes.length || this.stopping)) {
+          await sleep(Math.max(this.heldUntil - nowMs(), 5), this.transport.signal);
+          continue;
+        }
+        return;
+      }
       const size = batch.items.length;
       let putBack = 0;
       try {
@@ -386,8 +406,9 @@ export class Processor {
     const deadline = nowMs() + Math.max(timeoutMs, 0);
     this.flushes.push(deadline);
     try {
-      // Turns still open get up to half the time, so a streamed reply that ends later is still sent.
-      const until = nowMs() + Math.max(timeoutMs, 0) / 2;
+      // Turns still open get up to half the time (and no more than 10 s), so a streamed reply that ends
+      // later is still sent, while a turn that never ends cannot hold every later flush.
+      const until = nowMs() + Math.min(Math.max(timeoutMs, 0) / 2, MAX_OPEN_WAIT_MS);
       while (this.openRoots > 0 && nowMs() < until) await this.waitForChange(until - nowMs());
       const target = this.enqueued;
       if (this.completed >= target) return true;
@@ -406,6 +427,19 @@ export class Processor {
       return false;
     } finally {
       this.flushes.splice(this.flushes.indexOf(deadline), 1);
+    }
+  }
+
+  /**
+   * The process is ending (`beforeExit`, SIGTERM): flush within `timeoutMs`, and if that is not enough,
+   * stop the work and count what is left as failed. Without the second part the retry loop would keep
+   * the process alive for as long as the ingest URL is down.
+   */
+  async flushForExit(timeoutMs: number): Promise<void> {
+    try {
+      if (!(await this.flush(timeoutMs))) await this.abandon();
+    } catch (error) {
+      internalError("flushForExit", error);
     }
   }
 

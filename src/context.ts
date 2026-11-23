@@ -24,7 +24,8 @@
  */
 
 import { capture as captureValue, dumps, fit, toPlain } from "./json.js";
-import { RUNTIME } from "./runtime.js";
+import type { Processor } from "./processor.js";
+import { RUNTIME, nowMs } from "./runtime.js";
 import type { AlsLike } from "./runtime.js";
 import { sampleKey, sampleKeep } from "./processor.js";
 import { getState } from "./state.js";
@@ -256,6 +257,8 @@ interface PendingCall {
  */
 class PendingCalls {
   static readonly TTL_MS = 600_000;
+  /** An unlinked tool run is kept back from export this long (a quarter second), so a streamed reply that registers its calls just after can still link it. */
+  static readonly GRACE_MS = 250;
   static readonly LIMIT = 1024;
   private items: PendingCall[] = [];
   /** Tool runs that ended before the model's call was registered (a streamed reply is read in the background). */
@@ -274,6 +277,7 @@ class PendingCalls {
 
   /** Remember a finished tool run that found no call to link to; a later registration may fill it in. */
   orphan(span: Span, name: string, args: unknown, traceId: string, conversation: string | null): void {
+    span.holdUntil = nowMs() + PendingCalls.GRACE_MS;
     this.orphans.push({ span, name, args, traceId, conversation, at: Date.now() });
     this.orphans = this.orphans.slice(-256);
   }
@@ -284,6 +288,7 @@ class PendingCalls {
       const id = this.claim(o.name, o.args, o.traceId, o.conversation);
       if (id === null) return now - o.at < PendingCalls.TTL_MS;
       o.span.attributes["gen_ai.tool.call.id"] = id; // the span has ended but is still queued
+      o.span.holdUntil = 0;
       return false;
     });
   }
@@ -437,6 +442,8 @@ interface SpanSpec {
 interface Started {
   /** Set for a tool with no explicit call id: what to claim again when the tool ends. */
   claim?: { name: string; args: unknown };
+  /** Roots only: releases the open-turn count `flush()` waits on. */
+  release?: () => void;
   obs: Observation;
   store: Store;
   span: Span;
@@ -492,8 +499,8 @@ function startSpan(spec: SpanSpec): Started | null {
   } else if (spec.captureInput !== false && spec.input !== undefined && spec.input !== null) {
     setContent(obs, INPUT, spec.input);
   }
-  if (isRoot) state.processor.rootStarted();
-  return { obs, span, claim, store: { conversation: scope, root: isRoot ? obs : store.root, span, test: store.test } };
+  const release = isRoot ? holdRoot(state.processor) : undefined;
+  return { obs, span, claim, release, store: { conversation: scope, root: isRoot ? obs : store.root, span, test: store.test } };
 }
 
 function finishSpan(started: Started, error: unknown, failed: boolean): void {
@@ -512,7 +519,7 @@ function finishSpan(started: Started, error: unknown, failed: boolean): void {
   } catch (inner) {
     internalError(`${obs.kind}.end`, inner);
   } finally {
-    if (obs.isRoot) guard("rootEnded", () => getState()?.processor.rootEnded(), undefined);
+    started.release?.();
   }
 }
 
@@ -559,6 +566,25 @@ function runSpan<T>(spec: SpanSpec, fn: (obs: Observation) => T): T {
 
 /** How long a generation that never ended (a stream nobody read) keeps flush() waiting. */
 const OPEN_GENERATION_MS = 300_000;
+const OPEN_ROOT_MS = 60_000;
+
+/**
+ * A turn or trace is open until it ends; `flush()` waits (a little) for open ones. A turn that never
+ * settles must not be waited for ever, so the count is released by a timer too. Returns the release.
+ */
+function holdRoot(processor: Processor): () => void {
+  processor.rootStarted();
+  let open = true;
+  const timer = setTimeout(() => release(), OPEN_ROOT_MS);
+  (timer as { unref?: () => void }).unref?.();
+  const release = () => {
+    if (!open) return;
+    open = false;
+    clearTimeout(timer);
+    guard("rootEnded", () => processor.rootEnded(), undefined);
+  };
+  return release;
+}
 
 export interface GenerationHandle {
   readonly obs: Observation;

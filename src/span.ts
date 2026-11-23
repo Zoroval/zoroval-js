@@ -92,6 +92,8 @@ export class Span {
   attributes: Record<string, AttrValue> = {};
   events: SpanEvent[] = [];
   status: { code: number; message: string } | null = null;
+  /** Not exported before this time (`nowMs()` scale): a tool run waiting for its streamed tool call to be registered. */
+  holdUntil = 0;
 
   constructor(name: string, kind: number, parent: Span | null, attributes: Record<string, AttrValue>) {
     this.name = name;
