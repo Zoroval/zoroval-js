@@ -194,3 +194,41 @@ test("sha256 and uuid7 helpers behave", async () => {
   }
   assert.match(uuid7(), /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
+
+test("timestamps: nanosecond strings, parent before child, a 1 ms span has a duration", async () => {
+  const gateway = await startGateway();
+  zoroval.init({ apiKey: KEY, ingestUrl: gateway.url, ...fast });
+  await zoroval.conversation("t", async () => {
+    for (let i = 0; i < 50; i++) {
+      await zoroval.turn(() => zoroval.step("child", () => {}));
+    }
+    await zoroval.turn(() => zoroval.step("slow", () => sleep(3)));
+  });
+  await zoroval.flush(3000);
+  const spans = gateway.spans();
+  const big = (v) => BigInt(v);
+  const byId = new Map(spans.map((s) => [s.spanId, s]));
+  let subMs = 0;
+  let previousStart = 0n;
+  for (const s of spans) {
+    assert.match(s.startTimeUnixNano, /^\d{19}$/);
+    assert.match(s.endTimeUnixNano, /^\d{19}$/);
+    assert.ok(big(s.endTimeUnixNano) >= big(s.startTimeUnixNano), "end >= start");
+    if (!s.startTimeUnixNano.endsWith("000000")) subMs += 1;
+    const parent = byId.get(s.parentSpanId);
+    if (parent) {
+      assert.ok(big(s.startTimeUnixNano) >= big(parent.startTimeUnixNano), "child starts after its parent");
+      assert.ok(big(s.endTimeUnixNano) <= big(parent.endTimeUnixNano), "child ends before its parent");
+    }
+  }
+  for (const s of spans.filter((x) => x.name === "turn")) {
+    assert.ok(big(s.startTimeUnixNano) >= previousStart, "turns in order");
+    previousStart = big(s.startTimeUnixNano);
+  }
+  assert.ok(subMs > spans.length / 2, `sub-millisecond precision (${subMs} of ${spans.length})`);
+  const slow = spans.find((s) => s.name === "slow");
+  assert.ok(big(slow.endTimeUnixNano) - big(slow.startTimeUnixNano) >= 1_000_000n, "a 3 ms step lasts at least 1 ms");
+  const turns = spans.filter((s) => s.name === "turn");
+  assert.ok(turns.some((s) => big(s.endTimeUnixNano) > big(s.startTimeUnixNano)), "durations are not all zero");
+  await gateway.close();
+});

@@ -24,6 +24,7 @@
 import { SCOPE_NAME, SDK_NAME, VERSION } from "./version.js";
 import type { Config } from "./config.js";
 import { nowMs } from "./runtime.js";
+import { toNanos } from "./span.js";
 import type { AttrValue, Span } from "./span.js";
 import { addCount, logOnce, sleep, uuid7 } from "./util.js";
 
@@ -101,9 +102,6 @@ function keyValues(attributes: Record<string, AttrValue>): { key: string; value:
   return Object.entries(attributes).map(([key, value]) => ({ key, value: anyValue(value) }));
 }
 
-/** Decimal nanoseconds for a millisecond time (OTLP JSON writes uint64 as a string). */
-const nanos = (ms: number): string => String(Math.trunc(ms)) + "000000";
-
 class Aborted extends Error {}
 class RequestTimeout extends Error {}
 
@@ -172,11 +170,11 @@ export class Transport {
                 ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
                 name: span.name,
                 kind: span.kind,
-                startTimeUnixNano: nanos(span.startMs),
-                endTimeUnixNano: nanos(span.endMs || span.startMs),
+                startTimeUnixNano: toNanos(span.start),
+                endTimeUnixNano: toNanos(span.finish),
                 attributes: keyValues(span.attributes),
                 ...(span.events.length
-                  ? { events: span.events.map((e) => ({ timeUnixNano: nanos(e.timeMs), name: e.name, attributes: keyValues(e.attributes) })) }
+                  ? { events: span.events.map((e) => ({ timeUnixNano: toNanos(e.time), name: e.name, attributes: keyValues(e.attributes) })) }
                   : {}),
                 ...(span.status ? { status: { code: span.status.code, message: span.status.message } } : {}),
               })),

@@ -4,13 +4,14 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const root = new URL("..", import.meta.url).pathname;
+// require.resolve honours --conditions and package self-reference on every supported Node (import.meta.resolve is not stable on 18).
 const resolveWith = (conditions) =>
-  execFileSync(process.execPath, [...conditions.map((c) => `--conditions=${c}`), "--input-type=module", "-e", 'console.log(import.meta.resolve("zoroval"))'], { cwd: root, encoding: "utf8" }).trim();
+  execFileSync(process.execPath, [...conditions.map((c) => `--conditions=${c}`), "-e", 'console.log(require.resolve("zoroval"))'], { cwd: root, encoding: "utf8" }).trim();
 
 test("conditional exports pick one entry per runtime", () => {
-  assert.match(resolveWith([]), /dist\/node\.js$/);
-  assert.match(resolveWith(["workerd"]), /dist\/workerd\.js$/);
-  assert.match(resolveWith(["edge-light"]), /dist\/edge\.js$/);
+  assert.match(resolveWith([]), /dist\/node\.cjs$/);
+  assert.match(resolveWith(["workerd"]), /dist\/workerd\.cjs$/);
+  assert.match(resolveWith(["edge-light"]), /dist\/edge\.cjs$/);
 });
 
 test("the edge entries contain no Node-only import except node:async_hooks in the workerd one", () => {
