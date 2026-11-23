@@ -16,7 +16,7 @@
   "module": "./dist/node.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "zoroval": "./dist/cli.js"
+    "zoroval": "dist/cli.js"
   },
   "exports": {
     ".": {
