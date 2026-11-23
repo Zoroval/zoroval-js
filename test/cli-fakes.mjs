@@ -36,7 +36,7 @@ async function readBody(req) {
  * `routes[path]` is a function (body, callIndex) => [status, json, headers?] or a fixed [status, json].
  * Unknown paths answer 404, like the real app when the feature is off. `calls` records every request.
  */
-export async function startApp(routes = {}) {
+export async function startApp(routes = {}, { latencyMs = 0 } = {}) {
   const calls = [];
   const counts = {};
   const { server, url, close } = await listen(async (req, res) => {
@@ -49,6 +49,7 @@ export async function startApp(routes = {}) {
     const route = routes[path];
     const [status, payload, headers] = typeof route === "function" ? await route(body, index) : route ?? [404, {}];
     if (status === "hang") return; // never answer
+    if (latencyMs) await sleep(latencyMs);
     const data = typeof payload === "string" ? payload : JSON.stringify(payload);
     res.writeHead(status, { "content-type": "application/json", ...(headers ?? {}) });
     res.end(data);
@@ -92,6 +93,7 @@ export async function startGateway(options = {}) {
     const query = new URL(req.url, "http://x").searchParams;
     const record = { method: req.method, url: req.url, path, headers: req.headers, at: Date.now() };
     requests.push(record);
+    if (o.latencyMs) await sleep(o.latencyMs);
     const send = (status, payload, headers = {}) => {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(payload));
