@@ -282,6 +282,17 @@ test("env file: outside the project and a missing folder are refused", async () 
   await refusedBefore(dir, ["--file", "link/.env"], /is outside the project folder/);
 });
 
+test("a --root that does not exist is refused in words, not with a stack trace", async () => {
+  const app = await manualApp();
+  const dir = makeProject();
+  const r = await runCli(["login", "--root", join(dir, "missing"), "--app-url", app.url, "--no-browser"], { cwd: dir });
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /Cannot write the key to \.env: folder .*missing does not exist\./);
+  assert.equal(r.stderr, "");
+  assert.ok(!app.paths().includes("/api/agent-connect"));
+  await app.close();
+});
+
 test("env file: not a git repository is refused, --allow-no-git allows it", async () => {
   const dir = makeProject({ git: false });
   await refusedBefore(dir, [], /not inside a git repository, so the file cannot be shown to be git-ignored; use --allow-no-git if this folder is never committed\./);

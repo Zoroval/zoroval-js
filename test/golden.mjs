@@ -14,7 +14,7 @@ const pythonSrc = process.env.ZOROVAL_PYTHON_SRC ?? "/Users/inesh/Zoroval/zorova
 const cli = new URL("../dist/cli.js", import.meta.url).pathname;
 const base = new URL("./fixtures/detect/", import.meta.url).pathname;
 const args = process.argv.slice(2).filter((a) => a !== "--write");
-const names = args.length ? args : readdirSync(base).filter((n) => n.startsWith("python"));
+const names = args.length ? args : readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory() && e.name.startsWith("python")).map((e) => e.name);
 const env = { ...process.env, PYTHONPATH: pythonSrc, PYTHONDONTWRITEBYTECODE: "1" };
 for (const k of Object.keys(env)) if (k.startsWith("ZOROVAL_")) delete env[k];
 

@@ -174,3 +174,17 @@ test("args: abbreviations must be unique; --opt=value; -- ends options", () => {
   assert.equal(cli.parseArgs(["login", "--rep"], spec, "0").values.replace, true);
   assert.equal(cli.parseArgs(["detect", "--", "--odd-folder"], spec, "0").values.path, "--odd-folder");
 });
+
+test("JS: web servers need the import and the call that creates the app", () => {
+  const kinds = (src) => cli.scanJs(src).frameworks.map((f) => `${f.kind}:${f.line}`);
+  assert.deepEqual(kinds('import express from "express";\nconst app = express();'), ["express:2"]);
+  assert.deepEqual(kinds('const express = require("express");\nconst app = express();'), ["express:2"]);
+  assert.deepEqual(kinds('const f = require("fastify")({ logger: true });'), ["fastify:1"]);
+  assert.deepEqual(kinds('const a = require("express")();'), ["express:1"]);
+  assert.deepEqual(kinds('const a = require("other")();'), []);
+  assert.deepEqual(kinds("const app = express();"), []); // no import
+  assert.deepEqual(kinds('import express from "express";\napp.use(express.json());'), []); // not a call to express()
+  assert.deepEqual(kinds('import { Hono } from "hono";\nconst a = new Hono();'), ["hono:2"]);
+  assert.deepEqual(kinds('import Fastify from "fastify";\nconst f = Fastify({});'), ["fastify:2"]);
+  assert.deepEqual(kinds('import { Hono } from "hono"; const a = new Hono(); const b = new Hono();'), ["hono:1"]); // first only
+});

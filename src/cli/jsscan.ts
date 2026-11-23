@@ -157,8 +157,8 @@ export interface JsScan {
   workerLine: number | null;
   /** Line of the first exported HTTP handler (`export async function POST`) or default export, if any. */
   handlerLine: number | null;
-  tokens: Tok[];
-  match: Int32Array;
+  /** Web servers created in the file (first of each kind): Express, Hono, Fastify. */
+  frameworks: { kind: string; line: number }[];
 }
 
 const OPENAI_URL = "api.openai.com/v1/";
@@ -188,7 +188,7 @@ export function scanJs(source: string): JsScan {
   const nm = (i: number, v?: string) => i >= 0 && i < n && toks[i]!.k === "name" && (v === undefined || toks[i]!.v === v);
   const dot = (i: number) => op(i, ".", "?.");
 
-  const result: JsScan = { llmCalls: [], chatIds: [], imports: new Set(), workerLine: null, handlerLine: null, tokens: toks, match };
+  const result: JsScan = { llmCalls: [], chatIds: [], imports: new Set(), workerLine: null, handlerLine: null, frameworks: [] };
 
   /** First token of the member chain that ends at token `i` (`a.b().c.d`). */
   const chainStart = (i: number): number => {
@@ -300,6 +300,23 @@ export function scanJs(source: string): JsScan {
         }
       } else if (op(next, "=>") && !op(prev, ".")) candidate = true; // chatId => ...
       if (candidate) result.chatIds.push([t.line, t.v]);
+    }
+  }
+  // Web servers come last: an import of the package plus the call that creates the app.
+  const imported = (...names: string[]) => [...result.imports].some((m) => names.some((n) => m === n || m.startsWith(n + "/")));
+  const found = (kind: string, line: number) => {
+    if (!result.frameworks.some((f) => f.kind === kind)) result.frameworks.push({ kind, line });
+  };
+  for (let i = 0; i < n; i++) {
+    const t = toks[i]!;
+    if (t.k !== "name") continue;
+    if (t.v === "express" && op(i + 1, "(") && !dot(i - 1) && imported("express")) found("express", t.line);
+    else if ((t.v === "Hono" || t.v === "OpenAPIHono") && nm(i - 1, "new") && imported("hono", "@hono/zod-openapi")) found("hono", t.line);
+    else if ((t.v === "Fastify" || t.v === "fastify") && op(i + 1, "(") && !dot(i - 1) && imported("fastify")) found("fastify", t.line);
+    else if (t.v === "require" && op(i + 1, "(") && op(i + 3, ")") && op(i + 4, "(") && !dot(i - 1)) {
+      // require("fastify")({ ... }) and require("express")(): the call is on the module itself
+      const spec = toks[i + 2];
+      if (spec?.k === "str" && (spec.v === "express" || spec.v === "fastify")) found(spec.v, t.line);
     }
   }
   const seen = new Set<string>();

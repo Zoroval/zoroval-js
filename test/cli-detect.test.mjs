@@ -226,3 +226,24 @@ test(".d.ts files and files over 1 MB are not scanned; a file the tokenizer chok
   assert.equal(r.status, 0);
   assert.deepEqual(JSON.parse(r.stdout).llm_calls, []);
 });
+
+// ------------------------------------------------------------------ Express, Hono, Fastify (added last)
+
+test("Express, Hono and Fastify servers are entry points, after the Worker and Next.js ones", () => {
+  const express = report("express-app", TS_ENV).out;
+  assert.deepEqual(express.entry_points, [{ file: "src/server.ts", line: 4, kind: "express" }]);
+  assert.ok(express.plan.includes("Add `import * as zoroval from \"zoroval\"` and call `zoroval.init()` once when the app starts (for example in src/server.ts)."));
+  const fastify = report("fastify-app", TS_ENV).out;
+  assert.deepEqual(fastify.entry_points, [{ file: "server.js", line: 1, kind: "fastify" }]);
+  const hono = report("hono-worker", WORKER_ENV).out;
+  // the Worker `main` is already an entry point: the framework adds no second one for the same file
+  assert.deepEqual(hono.entry_points, [{ file: "src/index.ts", line: null, kind: "worker" }]);
+  assert.equal(hono.typescript.worker.nodejs_als, true);
+  assert.deepEqual(hono.llm_calls, [{ file: "src/index.ts", line: 6, provider: "openai", api: "fetch" }]);
+});
+
+test("a Hono app that is not a Worker main is still found; a server import without the call is not an entry point", () => {
+  const dir = makeProject({ files: { "package.json": '{"dependencies":{"hono":"4"}}', "src/app.ts": 'import { Hono } from "hono";\nexport const app = new Hono();', "src/types.ts": 'import type { Request } from "express";\nexport type R = Request;' } });
+  const out = JSON.parse(detect(dir, "--json").stdout);
+  assert.deepEqual(out.entry_points, [{ file: "src/app.ts", line: 2, kind: "hono" }]);
+});

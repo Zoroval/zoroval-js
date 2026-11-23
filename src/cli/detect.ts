@@ -312,6 +312,7 @@ export function scan(rootArg: string): Json {
   }
   if (nextProject) report.typescript.nextjs = true;
   addTypescriptEntryPoints(report, tsScans, worker);
+  addFrameworkEntryPoints(report, tsScans); // last: nothing above depends on it
 
   // servers and serverless
   const hintText = hintTexts.join("\n");
@@ -399,6 +400,19 @@ function addTypescriptEntryPoints(report: Json, scans: Map<string, ReturnType<ty
     else if (NEXT_PAGES_API.test(file)) entries.push({ file, line: result.handlerLine, kind: "nextjs_api" });
   }
   report.entry_points.push(...entries);
+}
+
+/** Express, Hono and Fastify servers, after every other entry point. A failure here costs only these entries. */
+function addFrameworkEntryPoints(report: Json, scans: Map<string, ReturnType<typeof scanJs>>): void {
+  try {
+    for (const [file, result] of scans) {
+      for (const { kind, line } of result.frameworks) {
+        if (!report.entry_points.some((e: Json) => e.file === file)) report.entry_points.push({ file, line, kind });
+      }
+    }
+  } catch {
+    /* the rest of the report stands */
+  }
 }
 
 const has = (packages: Record<string, string>, ...names: string[]): boolean => names.some((n) => norm(n) in packages);
@@ -519,7 +533,11 @@ function makePlan(report: Json, worker: Wrangler | null, nextProject: boolean, u
 function typescriptPlan(report: Json, worker: Wrangler | null, nextProject: boolean, usesOpenai: boolean, entryOf: (pred: (e: Json) => boolean) => string | undefined): string[] {
   const plan: string[] = [];
   const tsCalls = (report.llm_calls as Json[]).filter((c) => isTsFile(c.file));
-  const entry = worker ? entryOf((e) => e.kind === "worker") : entryOf((e) => String(e.kind).startsWith("nextjs"));
+  const entry = worker
+    ? entryOf((e) => e.kind === "worker")
+    : nextProject
+      ? entryOf((e) => String(e.kind).startsWith("nextjs"))
+      : entryOf((e) => isTsFile(e.file));
   plan.push("Install the package: `npm install zoroval` (or the project's package manager).");
   if (worker) {
     plan.push(`Worker: in the \`fetch\` handler${entry ? ` (${entry})` : ""} call \`zoroval.init({ apiKey: env.ZOROVAL_INGEST_KEY })\` (\`import * as zoroval from "zoroval"\`).`);

@@ -56,7 +56,12 @@ function isSymlink(path: string): boolean {
 
 /** Can the key go into `path`? Never reads or prints values. */
 export function check(path: string, root: string, allowNoGit = false): Check {
-  const realRoot = realpathSync(root);
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    realRoot = resolve(root); // a folder that does not exist: the parent check below says so
+  }
   const absolute = isAbsolute(path) ? path : join(realRoot, path);
   const parent = dirname(absolute);
   if (!existsSync(parent)) return { ok: false, reason: `folder ${parent} does not exist` };

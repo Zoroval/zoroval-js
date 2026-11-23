@@ -120,6 +120,28 @@ Outside Next.js on Vercel, use `waitUntil(zoroval.flush())` from `@vercel/functi
 `await zoroval.flush()` also works anywhere you want everything sent before moving on, and `await zoroval.shutdown()`
 sends what is left and stops.
 
+## Command line
+
+`npx zoroval` connects a project and checks it.
+
+```sh
+npx zoroval login     # sign in in your browser; the key is saved to a file git ignores
+npx zoroval doctor    # send a test trace and check that it arrives
+```
+
+`login` saves the key as `ZOROVAL_INGEST_KEY` in `.dev.vars` for a Cloudflare Worker, `.env.local` for a
+Next.js app and `.env` otherwise. It refuses a file that git tracks or does not ignore, so the key is never
+committed. Pick another file with `--file <path>` (the same as `--env-file`; on Node 20.6 or newer use `--file`,
+because Node reads `--env-file` itself and stops when that file does not exist yet).
+
+For production, add the key to your host yourself: `wrangler secret put ZOROVAL_INGEST_KEY` for a Worker, or the
+project's environment variables on Vercel. Make a separate key for production.
+
+`doctor` also checks that a Cloudflare Worker has the `nodejs_als` or `nodejs_compat` flag, and
+`npx zoroval doctor --wait 60` waits for your first real trace. `npx zoroval detect` lists what your project
+uses (add `--json` for a machine-readable report) and `npx zoroval logout` removes what `login` wrote. None of
+them prints your key or any value from your env files.
+
 ## Privacy
 
 Prompts, outputs and tool arguments are sent by default. Change that in `init()`:
