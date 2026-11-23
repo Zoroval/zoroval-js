@@ -122,7 +122,7 @@ export async function startFakeOpenAI(options = {}) {
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: { message: `no route ${path}`, type: "invalid_request_error" } }));
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
   const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}/v1`,
