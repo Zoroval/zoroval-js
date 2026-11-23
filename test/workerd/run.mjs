@@ -19,13 +19,14 @@ mkdirSync(join(project, "node_modules"));
 symlinkSync(root, join(project, "node_modules", "zoroval"), "dir");
 cpSync(fileURLToPath(new URL("./worker.mjs", import.meta.url)), join(project, "worker.mjs"));
 cpSync(fileURLToPath(new URL("./openai-worker.mjs", import.meta.url)), join(project, "openai-worker.mjs"));
+cpSync(fileURLToPath(new URL("./class-worker.mjs", import.meta.url)), join(project, "class-worker.mjs"));
 
 async function bundle(conditions, entry = "worker.mjs") {
   const result = await build({
     entryPoints: [join(project, entry)],
     bundle: true, write: false, format: "esm", platform: "neutral", target: "es2022",
     conditions, mainFields: ["module", "main"],
-    external: ["node:*"],
+    external: ["node:*", "cloudflare:*"],
   });
   return result.outputFiles[0].text;
 }
@@ -216,6 +217,26 @@ async function runWorker(flags, gatewayUrl, paths) {
   } finally {
     await mf.dispose();
     await fake.close();
+    await gateway.close();
+  }
+}
+
+// 7. withZoroval on a WorkerEntrypoint class: env and ctx come from `this`, the trace is sent.
+{
+  const gateway = await startGateway();
+  const mf = new Miniflare({
+    modules: [{ type: "ESModule", path: "worker.mjs", contents: await bundle(["workerd", "worker", "browser"], "class-worker.mjs") }],
+    compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_als"],
+    bindings: { ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url, NAME: "entrypoint" },
+  });
+  try {
+    const response = await mf.dispatchFetch("http://worker.test/?chat=K");
+    assert.equal(await response.text(), "class entrypoint");
+    for (let i = 0; i < 100 && !gateway.spans().length; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(gateway.spans()[0]?.attrs["zoroval.conversation.id"], "K");
+    console.log("ok - workerd WorkerEntrypoint class: withZoroval reads env and ctx from the instance, trace sent");
+  } finally {
+    await mf.dispose();
     await gateway.close();
   }
 }

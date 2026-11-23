@@ -15,8 +15,8 @@
  * queued before it, and nothing shared with another request's I/O (Workers refuse that). There
  * `flush()` has a hard deadline and what it had to send but could not is counted as failed, not
  * retried forever. `flush()` first waits, bounded, for turns still open, so a streamed reply that
- * ends after the response is returned is still sent (on Workers most of the flush time, since the
- * request lives only as long as `waitUntil`). No GenAI-span filter, scrubbing of foreign spans, or fork
+ * ends after the response is returned is still sent (for a `withZoroval` request, most of the flush
+ * time, since the request lives only as long as `waitUntil`). No GenAI-span filter, scrubbing of foreign spans, or fork
  * handling: every span is the SDK's own and a JavaScript process has no fork. Sampling uses the
  * same SHA-256 rule as Python, compared as a double instead of an exact 64-bit integer.
  */
@@ -413,12 +413,13 @@ export class Processor {
   // ------------------------------------------------------------------ flush and shutdown
 
   /**
-   * Wait until every span queued before this call is sent or given up. Never throws. `openWork`
-   * counts the turns and generations to wait for first (default: all of them in this process).
+   * Wait until every span queued before this call is sent or given up. Never throws. `scoped` counts
+   * one request's open turns and generations to wait for first (default: all of them in this process).
    */
-  async flush(timeoutMs: number, openWork: () => number = () => this.openRoots): Promise<boolean> {
+  async flush(timeoutMs: number, scoped?: () => number): Promise<boolean> {
     if (this.stopped) return true;
-    if (!RUNTIME.background) return this.flushHere(timeoutMs, openWork);
+    if (!RUNTIME.background) return this.flushHere(timeoutMs, scoped);
+    const openWork = scoped ?? (() => this.openRoots);
     const deadline = nowMs() + Math.max(timeoutMs, 0);
     this.flushes.push(deadline);
     try {
@@ -448,15 +449,19 @@ export class Processor {
    * waits on, wakes, or aborts work that belongs to another request: the platform may cancel that
    * request at any time, and Workers refuse I/O objects shared across requests.
    */
-  private async flushHere(timeoutMs: number, openWork: () => number): Promise<boolean> {
+  private async flushHere(timeoutMs: number, openWork: (() => number) | undefined): Promise<boolean> {
     const total = Math.max(timeoutMs, 0);
     const deadline = nowMs() + total;
     const controller = new AbortController();
     const signal = controller.signal;
-    this.flushes.push(deadline);
     try {
-      // Open turns and streams get all but the send reserve: the request lives only as long as this flush.
-      const until = deadline - Math.min(SEND_RESERVE_MS, total / 2);
+      // One request's own open turns and streams (withZoroval) get all but the send reserve: the request
+      // lives only as long as this flush. Open work counted across the whole isolate gets the Node bound,
+      // so a busy isolate cannot hold every flush.
+      const until = openWork
+        ? deadline - Math.min(SEND_RESERVE_MS, total / 2)
+        : nowMs() + Math.min(total / 2, MAX_OPEN_WAIT_MS);
+      openWork ??= () => this.openRoots;
       while (openWork() > 0 && nowMs() < until) await sleep(Math.min(POLL_MS, until - nowMs()), signal);
       const target = this.enqueued;
       for (;;) {
@@ -486,7 +491,6 @@ export class Processor {
       internalError("flush", error);
       return false;
     } finally {
-      this.flushes.splice(this.flushes.indexOf(deadline), 1);
       controller.abort();
     }
   }

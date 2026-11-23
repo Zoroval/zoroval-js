@@ -131,6 +131,24 @@ test("turn() and trace() return the callback's own promise, and a handled reject
   await gateway.close();
 });
 
+test("a failing turn nobody awaits is still reported as an unhandled rejection, as without tracing", async () => {
+  const { execFile } = await import("node:child_process");
+  const gateway = await startGateway();
+  const script = `
+    const z = await import(${JSON.stringify(new URL("../dist/node.js", import.meta.url).href)});
+    const seen = [];
+    process.on("unhandledRejection", (r) => seen.push(r.message));
+    if (process.argv[2] === "on") z.init({ apiKey: process.argv[3], ingestUrl: process.argv[4] });
+    void z.turn({}, async () => { throw new Error("lost"); });
+    await new Promise((r) => setTimeout(r, 50));
+    console.log(JSON.stringify(seen));
+    process.exit(0);`;
+  const run = (mode) => new Promise((resolve, reject) => execFile(process.execPath, ["--input-type=module", "-e", script, mode, KEY, gateway.url], (e, out) => (e ? reject(e) : resolve(JSON.parse(out.trim().split("\n").pop())))));
+  assert.deepEqual(await run("off"), ["lost"]);
+  assert.deepEqual(await run("on"), ["lost"]);
+  await gateway.close();
+});
+
 test("withZoroval(WorkerEntrypoint class) wraps its handlers; anything else without handlers fails loudly", async () => {
   const gateway = await startGateway();
   class Entrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }

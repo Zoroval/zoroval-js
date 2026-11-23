@@ -566,9 +566,24 @@ function runSpan<T>(spec: SpanSpec, fn: (obs: Observation) => T): T {
     finishSpan(active, error, true);
     throw error;
   }
+  if (result instanceof Promise && result.constructor === Promise) {
+    // A plain promise: hand back one that settles after the span ends, so an unhandled rejection is
+    // still reported by the runtime as it would be without tracing.
+    return result.then(
+      (value) => {
+        finishSpan(active, null, false);
+        return value;
+      },
+      (error) => {
+        finishSpan(active, error, true);
+        throw error;
+      },
+    ) as T;
+  }
   if (isThenable(result)) {
-    // The app gets its own promise back (an SDK's promise subclass keeps its methods); the span ends
-    // on the side. That side never rethrows: the app handles its own rejection, or Node reports it once.
+    // A promise subclass or other thenable (an SDK's API promise): the app gets its own object back,
+    // with its methods, and the span ends on the side. The side never rethrows, which would add a
+    // second rejection the app cannot handle.
     try {
       result.then(
         () => finishSpan(active, null, false),
