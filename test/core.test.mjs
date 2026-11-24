@@ -30,7 +30,7 @@ test("check 1 (core): two turns in one conversation share one conversation id, P
   assert.match(req.headers["x-zoroval-batch-id"], /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(req.resource["service.name"], "shop");
   assert.equal(req.resource["zoroval.sdk.name"], "zoroval-js");
-  assert.equal(req.resource["zoroval.sdk.version"], "0.1.0");
+  assert.equal(req.resource["zoroval.sdk.version"], "0.2.0");
   assert.equal(req.resource["deployment.environment.name"], "prod");
   assert.equal(req.resource["service.version"], "1.2.3");
   assert.equal(req.scope.name, "zoroval");

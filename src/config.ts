@@ -8,6 +8,8 @@
  * No log-export settings: this SDK exports spans only.
  */
 
+import { buildHook } from "./redact.js";
+import type { RedactOption } from "./redact.js";
 import { readEnv, RUNTIME } from "./runtime.js";
 
 export const DEFAULT_INGEST_URL = "https://ingest.zoroval.com";
@@ -45,10 +47,12 @@ export interface InitOptions {
   serviceName?: string;
   environment?: string;
   release?: string;
-  /** Send prompts, outputs and tool arguments (default true). */
-  captureContent?: boolean;
-  /** Called on every text field before it is sent. If it throws, that field is dropped. */
-  redact?: (value: unknown) => unknown;
+  /**
+   * Off by default. "basic" replaces card numbers, emails, phone numbers, Aadhaar, PAN and API keys
+   * with labels; a function runs your own on every content field; ["basic", fn] runs both, basic
+   * first. If the function throws or returns null, that field is dropped.
+   */
+  redact?: RedactOption;
   /** Head sampling from 0 to 1, kept whole per conversation. */
   sampleRate?: number;
   enabled?: boolean;
@@ -60,8 +64,10 @@ export interface Config {
   serviceName: string;
   environment: string | null;
   release: string | null;
-  captureContent: boolean;
+  /** The effective hook: built-in rules, the developer's function, or both chained. */
   redact: ((value: unknown) => unknown) | null;
+  /** null, "basic", "function" or "basic+function". */
+  redactMode: string | null;
   sampleRate: number;
   enabled: boolean;
   // Transport and queue.
@@ -130,7 +136,7 @@ function defaultServiceName(): string {
 }
 
 /** Build a Config from `init()` options (undefined means "not given") and the environment. */
-export function resolve(options: Record<string, unknown> = {}): { cfg: Config; unknown: string[] } {
+export function resolve(options: Record<string, unknown> = {}): { cfg: Config; unknown: string[]; refuse?: string } {
   const given: Record<string, unknown> = {};
   const unknown: string[] = [];
   for (const [key, value] of Object.entries(options)) {
@@ -142,6 +148,9 @@ export function resolve(options: Record<string, unknown> = {}): { cfg: Config; u
     return value || (env ? readEnv(env) : undefined) || null;
   };
   const apiKey = str("apiKey", ENV_KEY)?.trim() || null;
+  const hook = buildHook(given.redact);
+  // Content-off was removed in 0.2.0. Starting anyway would send what this app chose not to send.
+  const contentOff = "captureContent" in options ? options.captureContent === false : !envBool("ZOROVAL_CAPTURE_CONTENT", true);
   const sampleRaw = typeof given.sampleRate === "number" ? given.sampleRate : envNumber("ZOROVAL_SAMPLE_RATE", 1);
   const cfg: Config = {
     apiKey,
@@ -149,9 +158,8 @@ export function resolve(options: Record<string, unknown> = {}): { cfg: Config; u
     serviceName: str("serviceName") ?? defaultServiceName(),
     environment: str("environment", "ZOROVAL_ENVIRONMENT"),
     release: str("release", "ZOROVAL_RELEASE"),
-    captureContent:
-      typeof given.captureContent === "boolean" ? given.captureContent : envBool("ZOROVAL_CAPTURE_CONTENT", true),
-    redact: typeof given.redact === "function" ? (given.redact as Config["redact"]) : null,
+    redact: hook.hook,
+    redactMode: hook.mode,
     sampleRate: Math.min(1, Math.max(0, Number.isFinite(sampleRaw) ? sampleRaw : 1)),
     enabled: typeof given.enabled === "boolean" ? given.enabled : envBool("ZOROVAL_ENABLED", true),
     ...TUNING_DEFAULTS,
@@ -163,7 +171,13 @@ export function resolve(options: Record<string, unknown> = {}): { cfg: Config; u
   if (given.extraHeaders && typeof given.extraHeaders === "object") {
     cfg.extraHeaders = { ...(given.extraHeaders as Record<string, string>) };
   }
-  return { cfg, unknown };
+  const refuse = hook.error
+    ? `zoroval: init() ${hook.error}. Tracing is off.`
+    : contentOff
+      ? "zoroval: captureContent was removed in 0.2.0. Tracing is off so prompts and outputs are not sent. " +
+        "Remove captureContent (or ZOROVAL_CAPTURE_CONTENT) and use redact to clean content before it is sent."
+      : undefined;
+  return { cfg, unknown, refuse };
 }
 
 export function tracesUrl(cfg: Config): string {

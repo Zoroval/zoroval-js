@@ -1,6 +1,6 @@
 {
   "name": "zoroval",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zoroval tracing for TypeScript and JavaScript LLM apps, grouped as whole conversations.",
   "license": "Apache-2.0",
   "type": "module",
@@ -62,12 +62,13 @@
     "build": "tsup && tsup --config tsup.cli.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && tsup --config tsup.test.config.ts && node scripts/run-tests.mjs",
-    "test:workerd": "npm run build && node test/workerd/run.mjs",
+    "test:workerd": "npm run build && node test/workerd/run.mjs && node test/workerd/redact-cpu.mjs",
     "size": "npm run build && node scripts/size.mjs",
     "test:next": "node test/nextjs/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
+    "edge-runtime": "^4.0.1",
     "esbuild": "^0.28.2",
     "miniflare": "^4.20260730.0",
     "openai": "^7.62.0",

@@ -84,8 +84,12 @@ function removeProcessHooks(): void {
 export function init(options: InitOptions = {}): boolean {
   try {
     if (getState()) return true; // the first good configuration stays
-    const { cfg, unknown } = resolve({ ...options });
+    const { cfg, unknown, refuse } = resolve({ ...options });
     if (unknown.length) logOnce("unknown-options", `zoroval: init() ignored unknown options: ${unknown.join(", ")}.`);
+    if (refuse) {
+      logOnce(`refuse:${refuse}`, refuse);
+      return declined();
+    }
     if (!cfg.enabled || !cfg.apiKey) return declined();
     if (keyIdOf(cfg.apiKey) === null) {
       logOnce("bad-key", "zoroval: the ingest key does not look like a Zoroval ingest key (zv_ingest_...). Tracing is off.");
@@ -157,7 +161,7 @@ export function status(): Record<string, unknown> {
     out.exportState = state.transport.exportState();
     out.exportResumesInS = Math.round(state.transport.holdRemaining() / 100) / 10;
     out.sampleRate = state.cfg.sampleRate;
-    out.captureContent = state.cfg.captureContent;
+    out.redact = state.cfg.redactMode;
   }
   return out;
 }

@@ -25,6 +25,7 @@
 
 import { capture as captureValue, dumps, fit, toPlain } from "./json.js";
 import type { Processor } from "./processor.js";
+import { redactText, redactValue } from "./redact.js";
 import { RUNTIME, nowMs } from "./runtime.js";
 import type { AlsLike } from "./runtime.js";
 import { sampleKey, sampleKeep } from "./processor.js";
@@ -169,10 +170,10 @@ export function cleanTags(tags: Iterable<unknown> | null | undefined): string[] 
 
 // ---------------------------------------------------------------------------- capture helpers
 
-/** False when content must not be serialized for this span (capture off, span ended, or sampled out). */
+/** False when content must not be serialized for this span (tracing off, span ended, or sampled out). */
 export function contentAllowed(obs: Observation): boolean {
   const state = getState();
-  if (!state || !obs.span || obs.span.ended || !state.cfg.captureContent) return false;
+  if (!state || !obs.span || obs.span.ended) return false;
   if (state.cfg.sampleRate < 1) {
     return sampleKeep(sampleKey(obs.conversationId, obs.span.traceId), state.cfg.sampleRate);
   }
@@ -184,7 +185,6 @@ export function setContent(obs: Observation, key: string, value: unknown, limit?
   const state = getState();
   if (!state || !obs.span || value === null || value === undefined || !contentAllowed(obs)) return;
   const captured = captureValue(value, {
-    captureContent: state.cfg.captureContent,
     redact: state.cfg.redact,
     limit: limit ?? state.cfg.maxContentBytes,
   });
@@ -198,10 +198,34 @@ export function addTruncated(span: Span, count: number): void {
   span.setAttribute(TRUNCATED, (typeof previous === "number" ? previous : 0) + count);
 }
 
+function builtinOn(): boolean {
+  return (getState()?.cfg.redactMode ?? "").startsWith("basic");
+}
+
+/** Built-in rules on free text the redact hook does not see (error messages, stacks). */
+function scrubText(text: string): string {
+  if (!builtinOn()) return text;
+  try {
+    return redactText(text);
+  } catch {
+    addCount("redactErrors");
+    return "[not sent: redaction failed]";
+  }
+}
+
 function setMetadataAttr(span: Span, metadata: Record<string, unknown>): void {
   if (Object.keys(metadata).length === 0) return;
   const limit = getState()?.cfg.maxMetadataBytes ?? 16 * 1024;
-  const [text, cut] = fit(dumps(metadata), limit);
+  let value: unknown = metadata;
+  if (builtinOn()) {
+    try {
+      value = redactValue(metadata);
+    } catch {
+      addCount("redactErrors"); // cannot scan: send nothing rather than raw values
+      return;
+    }
+  }
+  const [text, cut] = fit(dumps(value), limit);
   span.setAttribute(METADATA, text);
   if (cut) addTruncated(span, cut);
 }
@@ -247,12 +271,13 @@ export function recordError(span: Span, error: unknown): void {
     // is what Python records (`__qualname__`).
     const type = isError ? (error.name && error.name !== "Error" ? error.name : error.constructor?.name || "Error") : typeof error;
     const text = isError ? error.message : String(error);
-    span.setError(`${type}: ${text}`.slice(0, 32768));
+    span.setError(scrubText(`${type}: ${text}`.slice(0, 32768)));
     let stack = isError && typeof error.stack === "string" ? error.stack : "";
     if (stack.length > limit) stack = stack.slice(-limit);
+    stack = scrubText(stack);
     span.addEvent("exception", {
       "exception.type": type,
-      "exception.message": text.slice(0, 32768),
+      "exception.message": scrubText(text.slice(0, 32768)),
       "exception.stacktrace": stack,
       "exception.escaped": true,
     });
