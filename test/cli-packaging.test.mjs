@@ -46,7 +46,9 @@ test("the runtime bundle stays under the 24 KB gzip budget for every entry (abou
 
 test("npm pack ships dist, README and LICENSE only: the CLI, no sources, tests or fixtures", () => {
   const out = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" }));
-  const files = out[0].files.map((f) => f.path);
+  // npm 11 prints an array, npm 12 an object keyed by package name.
+  const packed = Array.isArray(out) ? out[0] : Object.values(out)[0];
+  const files = packed.files.map((f) => f.path);
   assert.ok(files.includes("dist/cli.js"));
   assert.ok(files.includes("dist/node.js") && files.includes("README.md") && files.includes("LICENSE"));
   assert.ok(files.every((f) => f === "package.json" || f === "README.md" || f === "LICENSE" || f.startsWith("dist/")), files.join(" "));
