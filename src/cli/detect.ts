@@ -16,6 +16,7 @@ import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import * as envfile from "./envfile.js";
 import { scanJs } from "./jsscan.js";
+import type { JsScan } from "./jsscan.js";
 import { findWrangler, isNext } from "./project.js";
 import type { Wrangler } from "./project.js";
 import { scanPython } from "./pyscan.js";
@@ -355,6 +356,17 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
     for (const [line, api, base] of result.llmCalls) tsOpenAICalls.push({ file, line, provider: "openai", api, ...(base ? { base_url: base } : {}) });
     for (const [line, name] of result.chatIds) tsChatIds.push({ file, line, name });
   }
+  // The conversation id is read where the model is called: server files first (an entry point, a handler or a
+  // model call), then the rest, and browser components last (they only send the id to the server).
+  const browserOnly = (r: JsScan): boolean => ["react", "react-dom", "react-dom/client", "vue", "svelte"].some((m) => r.imports.has(m)) &&
+    r.workerLine === null && r.handlerLine === null && r.llmCalls.length === 0;
+  const rank = (file: string): number => {
+    const r = tsScans.get(file);
+    if (!r) return 1;
+    if (r.workerLine !== null || r.llmCalls.length > 0 || (r.handlerLine !== null && !browserOnly(r))) return 0;
+    return browserOnly(r) ? 2 : 1;
+  };
+  tsChatIds.sort((a, b) => rank(a.file) - rank(b.file));
   const worker = findWrangler(root);
   const nextProject = isNext(root);
   // Each file belongs to the service (package.json folder) that is closest to it.

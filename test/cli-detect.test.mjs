@@ -326,6 +326,23 @@ test("a Python app, a forwarding Worker and a TypeScript chat service: two servi
   assert.ok(out.plan.some((s) => s.includes("(for example in ts/src/")));
 });
 
+test("Worker app with a React front end: the call through a fetch alias is found, and the Worker's chat id comes before the browser's", () => {
+  const dir = makeProject({ files: {
+    "package.json": '{"dependencies":{"react":"19"},"devDependencies":{"wrangler":"4"}}',
+    "wrangler.jsonc": '{ "name": "w", "main": "worker/index.ts", "compatibility_flags": ["nodejs_als"] }',
+    "src/Chat.tsx": 'import { useRef } from "react";\nexport function Chat() {\n  const chatId = useRef(crypto.randomUUID());\n  return null;\n}',
+    "shared/agent.ts": 'export async function runAgent(opts) {\n  const doFetch = opts.fetchImpl ?? fetch;\n  return doFetch("https://api.openai.com/v1/responses", { method: "POST" });\n}',
+    "worker/index.ts": 'import { runAgent } from "../shared/agent";\nexport default {\n  async fetch(req, env) {\n    const body = await req.json();\n    const chatId = body.chatId;\n    return Response.json(await runAgent({}));\n  },\n};',
+  } });
+  const r = detect(dir, "--json");
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out.llm_calls, [{ file: "shared/agent.ts", line: 3, provider: "openai", api: "fetch" }]);
+  assert.equal(out.chat_id_candidates[0].file, "worker/index.ts");
+  assert.equal(out.chat_id_candidates.at(-1).file, "src/Chat.tsx");
+  assert.ok(out.plan.some((s) => s.includes("candidate at worker/index.ts:")), out.plan.join("\n"));
+});
+
 test("TypeScript chat ids: const, let and assignments count, plain comparisons do not", () => {
   const { out } = report("split-python-ts", { ".env": "A=1\n" });
   const ts = out.chat_id_candidates.filter((c) => c.file.startsWith("ts/")).map((c) => `${c.file}:${c.line}:${c.name}`);

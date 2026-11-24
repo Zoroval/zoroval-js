@@ -85,6 +85,14 @@ test("JS: fetch to the OpenAI API, directly or through a constant; other URLs an
   assert.deepEqual(calls('fetch(url)'), []);
 });
 
+test("JS: fetch through a name that holds it, or a fetch-named function, counts only with an OpenAI URL", () => {
+  assert.deepEqual(calls('const doFetch = opts.fetchImpl ?? fetch;\nconst res = await doFetch("https://api.openai.com/v1/responses", {});'), [[2, "fetch"]]);
+  assert.deepEqual(calls('const f = fetch;\nf("https://api.openai.com/v1/chat/completions")'), [[2, "fetch"]]);
+  assert.deepEqual(calls('opts.fetchImpl("https://api.openai.com/v1/chat/completions")'), [[1, "fetch"]]);
+  assert.deepEqual(calls('const doFetch = opts.fetchImpl ?? fetch;\ndoFetch("https://example.com/v1/x")'), []);
+  assert.deepEqual(calls('const run = makeRunner();\nrun("https://api.openai.com/v1/responses")'), []);
+});
+
 test("JS: conversation ids as parameters, properties and destructured fields, not as plain use", () => {
   assert.deepEqual(ids("function f(chatId, b) {}"), ["1:chatId"]);
   assert.deepEqual(ids("const f = (a, chatId: string) => 1;"), ["1:chatId"]);

@@ -4,7 +4,7 @@
  * mention of `chat.completions.create(` in a comment or a string is not a call.
  *
  * Reports: OpenAI calls (`.chat.completions.create|parse|stream(`, `.responses.create|parse|stream(`,
- * `fetch(` to an OpenAI chat or responses URL, literal or built from a base variable), conversation-id candidates (parameters, properties, destructured
+ * `fetch(` or a fetch alias such as `doFetch(` to an OpenAI chat or responses URL, literal or built from a base variable), conversation-id candidates (parameters, properties, destructured
  * fields), module imports, and Worker entry points (`export default { fetch }`, `addEventListener("fetch")`).
  */
 
@@ -250,12 +250,21 @@ export function scanJs(source: string): JsScan {
   // URLs bound to a name (`const url = "https://api.openai.com/v1/..."`, `` `${base}/chat/completions` ``,
   // `base + "/responses"`), for `fetch(url)`
   const bound = new Map<string, string>();
+  // Names that hold `fetch` itself (`const doFetch = opts.fetchImpl ?? fetch`), so `doFetch(url)` counts as a fetch call.
+  const fetchAliases = new Set<string>();
   for (let i = 0; i + 2 < n; i++) {
     if (nm(i) && op(i + 1, "=") && !op(i + 2, "=", ">") && !dot(i - 1)) {
       const end = exprEnd(i + 2);
       if (end - (i + 2) <= 12 && toks.slice(i + 2, end).some((tok) => tok.k === "str")) bound.set(toks[i]!.v, urlText(i + 2, end));
+      if (end - (i + 2) <= 12 && toks.slice(i + 2, end).some((tok, k) => tok.k === "name" && tok.v === "fetch" && !dot(i + 1 + k))) fetchAliases.add(toks[i]!.v);
     }
   }
+  /** A call to `fetch`, to a name that holds it, or to a fetch-named function (`fetchImpl(url)`, `opts.fetchFn(url)`). */
+  const isFetchCall = (i: number): boolean => {
+    const v = toks[i]!.v;
+    if (v === "fetch") return !(dot(i - 1) && !nm(i - 2, "globalThis") && !nm(i - 2, "window") && !nm(i - 2, "self"));
+    return fetchAliases.has(v) || /fetch/i.test(v);
+  };
 
   for (let i = 0; i < n; i++) {
     const t = toks[i]!;
@@ -287,7 +296,7 @@ export function scanJs(source: string): JsScan {
         result.llmCalls.push([toks[chainStart(i - 2)]!.line, `responses.${m}`]);
       }
     }
-    if (t.k === "name" && t.v === "fetch" && op(i + 1, "(") && !(dot(i - 1) && !nm(i - 2, "globalThis") && !nm(i - 2, "window") && !nm(i - 2, "self"))) {
+    if (t.k === "name" && op(i + 1, "(") && isFetchCall(i)) {
       const arg = toks[i + 2];
       const end = exprEnd(i + 2);
       const url = arg?.k === "name" && end === i + 3 ? bound.get(arg.v) : urlText(i + 2, end);
