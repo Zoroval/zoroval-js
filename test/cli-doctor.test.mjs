@@ -15,7 +15,7 @@ test("doctor passes: checks in order, text lines, exit 0, key never shown", asyn
   const r = await doctor(gw, dir);
   assert.equal(r.code, 0, r.stdout + r.stderr);
   const lines = r.stdout.trimEnd().split("\n");
-  assert.equal(lines[0], "[ok  ] sdk: zoroval 0.2.0");
+  assert.equal(lines[0], "[ok  ] sdk: zoroval 0.2.1");
   assert.deepEqual(lines.slice(1).map((l) => l.split(":")[0]), [
     "[ok  ] key", "[ok  ] gateway", "[ok  ] test trace", "[ok  ] test trace processed", "[ok  ] grouping", "[ok  ] first trace received", "[warn] traces this run", "Doctor",
   ]);
@@ -50,7 +50,7 @@ test("the test trace: two turns, one conversation, each with a child step, boole
   assert.equal(post.headers["content-encoding"], "gzip");
   assert.equal(post.headers["content-type"], "application/json");
   assert.equal(post.headers.authorization, `Bearer ${KEY}`);
-  assert.equal(post.headers["user-agent"], "zoroval-js/0.2.0");
+  assert.equal(post.headers["user-agent"], "zoroval-js/0.2.1");
   assert.equal(post.path, "/v1/traces");
   assert.equal(post.resource["service.name"], "zoroval-doctor");
   assert.equal(post.resource["zoroval.sdk.name"], "zoroval-js");
@@ -317,7 +317,7 @@ test("installed packages are listed from node_modules", async () => {
   const dir = makeProject({ files: { "node_modules/openai/package.json": '{"version":"5.1.0"}' } });
   const r = await doctor(gw, dir, ["--no-test-trace", "--json"]);
   assert.deepEqual(json(r).checks.slice(0, 2), [
-    { level: "pass", check: "sdk", detail: "zoroval 0.2.0" },
+    { level: "pass", check: "sdk", detail: "zoroval 0.2.1" },
     { level: "pass", check: "package openai", detail: "5.1.0" },
   ]);
   await gw.close();
