@@ -53,6 +53,7 @@ interface RuleSpec {
   prefilter?: string;
   validators?: string[];
   deny_prefix?: { window: number; pattern: string };
+  require_prefix?: { window: number; pattern: string };
 }
 
 interface RulesDoc {
@@ -69,6 +70,8 @@ interface Rule {
   validators: ((digits: string) => boolean)[];
   deny: RegExp | null;
   window: number;
+  require: RegExp | null;
+  requireWindow: number;
 }
 
 interface Rules {
@@ -99,6 +102,8 @@ function compile(doc: RulesDoc): Rules {
     }),
     deny: spec.deny_prefix ? new RegExp(spec.deny_prefix.pattern) : null,
     window: spec.deny_prefix ? spec.deny_prefix.window : 0,
+    require: spec.require_prefix ? new RegExp(spec.require_prefix.pattern) : null,
+    requireWindow: spec.require_prefix ? spec.require_prefix.window : 0,
   }));
   return {
     fold,
@@ -133,6 +138,13 @@ function foldText(text: string, table: Uint16Array): string {
 const ASCII = /^[\x00-\x7f]*$/;
 
 // ---------------------------------------------------------------------------- strings
+
+/** The lower-cased text a prefix check looks at: the key (if any), then the text before the match. */
+function before(shadow: string, start: number, window: number, context: string): string {
+  let text = shadow.slice(Math.max(0, start - window), start);
+  if (context && start < window) text = (context + text).slice(-window);
+  return text.toLowerCase();
+}
 
 /**
  * Replace level-1 values in one string with labels. Returns the same string when nothing matched.
@@ -171,11 +183,8 @@ export function redactText(text: string, key?: string | null): string {
         const digits = m[0].replace(NOT_DIGIT, "");
         if (!rule.validators.every((check) => check(digits))) continue;
       }
-      if (rule.deny) {
-        let before = shadow.slice(Math.max(0, start - rule.window), start);
-        if (context && start < rule.window) before = (context + before).slice(-rule.window);
-        if (rule.deny.test(before.toLowerCase())) continue;
-      }
+      if (rule.deny && rule.deny.test(before(shadow, start, rule.window, context))) continue;
+      if (rule.require && !rule.require.test(before(shadow, start, rule.requireWindow, context))) continue;
       out += text.slice(last, start) + rule.label;
       if (!same) sh += shadow.slice(last, start) + rule.label;
       last = end;

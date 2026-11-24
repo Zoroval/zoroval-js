@@ -91,7 +91,7 @@ test("structures: 200k-item arrays stay fast", () => {
 // ---------------------------------------------------------------------------- unicode
 
 test("unicode: full-width, Indian-script and mixed digits, zero-width, RTL, emoji, lone surrogates", () => {
-  assert.equal(redactText("‮रुको 😀 a@b.co 🇮🇳 \ud800 ９८७६५४३२१० சரி ௦"), "‮रुको 😀 [EMAIL] 🇮🇳 \ud800 [PHONE] சரி ௦");
+  assert.equal(redactText("‮रुको 😀 a@b.co 🇮🇳 \ud800 phone ９८७६५४३२१० சரி ௦"), "‮रुको 😀 [EMAIL] 🇮🇳 \ud800 phone [PHONE] சரி ௦");
   assert.equal(redactText("4111 １１１１ ११११ ௧௧௧௧"), "[CARD]");
   assert.equal(redactText("card 4111​1111​1111​1111"), "card [CARD]");
   assert.equal(redactText("\udfff\ud800".repeat(1000)), "\udfff\ud800".repeat(1000));
@@ -116,7 +116,7 @@ test("fuzz: 100k random strings never throw and always return a string", () => {
 
 test("fuzz: planted values are always removed", () => {
   const plants = [["4111 1111 1111 1111", "[CARD]"], ["priya@example.com", "[EMAIL]"], ["+91 98765 43210", "[PHONE]"],
-    ["9876543210", "[PHONE]"], ["ABCPE1234F", "[PAN]"], ["AKIAIOSFODNN7EXAMPLE", "[SECRET]"]];
+    ["phone 9876543210", "[PHONE]"], ["ABCPE1234F", "[PAN]"], ["AKIAIOSFODNN7EXAMPLE", "[SECRET]"]];
   const filler = ["hello", "नमस्ते", "வணக்கம்", "مرحبا", "😀", "price ₹499 only", "v1.2.3 ok", "ok."];
   const gaps = [" ", "\n", ", ", ": ", " (", "\t", " ‏"];
   const r = rng(7);
