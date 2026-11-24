@@ -50,7 +50,7 @@ test("login with an approved setup code: no link, no browser, one poll, key writ
   assert.equal(connect.setup_code, SETUP_CODE);
   assert.equal(connect.name, `${dir2.split("/").pop()} (agent)`.slice(0, 120));
   assert.equal(app2.paths().filter((p) => p === "/api/agent-connect/token").length, 1);
-  assert.equal(app2.calls.find((c) => c.path === "/api/agent-connect").headers["user-agent"], "zoroval-js/0.1.0");
+  assert.equal(app2.calls.find((c) => c.path === "/api/agent-connect").headers["user-agent"], "zoroval-js/0.2.0");
   await app2.close();
 });
 
@@ -507,7 +507,7 @@ test("usage errors exit 2 with usage on stderr and nothing on stdout", async () 
 
 test("--version, --help and option prefixes", async () => {
   let r = await runCli(["--version"]);
-  assert.equal(r.stdout, "zoroval 0.1.0\n");
+  assert.equal(r.stdout, "zoroval 0.2.0\n");
   assert.equal(r.code, 0);
   r = await runCli(["--help"]);
   assert.match(r.stdout, /usage: zoroval \[-h\] \[--version\] \{detect,login,logout,doctor\} \.\.\./);

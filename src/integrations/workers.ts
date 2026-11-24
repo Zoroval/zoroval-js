@@ -31,13 +31,14 @@ function flag(value: string | undefined): boolean | undefined {
 function optionsFrom(env: unknown, explicit: InitOptions): InitOptions {
   const bindings = env !== null && typeof env === "object" ? (env as Record<string, unknown>) : {};
   const rate = Number(text(bindings, "ZOROVAL_SAMPLE_RATE"));
-  const fromEnv: InitOptions = {
+  const fromEnv: InitOptions & { captureContent?: boolean } = {
     apiKey: text(bindings, "ZOROVAL_INGEST_KEY"),
     ingestUrl: text(bindings, "ZOROVAL_INGEST_URL"),
     serviceName: text(bindings, "ZOROVAL_SERVICE_NAME"),
     environment: text(bindings, "ZOROVAL_ENVIRONMENT"),
     release: text(bindings, "ZOROVAL_RELEASE"),
-    captureContent: flag(text(bindings, "ZOROVAL_CAPTURE_CONTENT")),
+    // Removed in 0.2.0; still read so a binding that turned content off keeps tracing off.
+    ...(flag(text(bindings, "ZOROVAL_CAPTURE_CONTENT")) === false ? { captureContent: false } : {}),
     sampleRate: text(bindings, "ZOROVAL_SAMPLE_RATE") !== undefined && Number.isFinite(rate) ? rate : undefined,
     enabled: flag(text(bindings, "ZOROVAL_ENABLED")),
   };

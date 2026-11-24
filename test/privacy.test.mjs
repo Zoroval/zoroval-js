@@ -25,18 +25,59 @@ async function run(options, body) {
   return result;
 }
 
-test("check 4: captureContent false sends no prompt, output or tool text", async () => {
-  const { gateway, text, spans } = await run({ captureContent: false });
-  assert.equal(spans.length, 2);
-  assert.ok(!text.includes(SECRET), "secret must not leave the app");
-  for (const s of spans) {
-    for (const key of ["zoroval.input", "zoroval.output", "gen_ai.tool.call.arguments", "gen_ai.tool.call.result"]) {
-      assert.equal(key in s.attrs, false, key);
-    }
-  }
+test("captureContent false (removed in 0.2.0) keeps tracing off, so nothing is sent", async () => {
+  const gateway = await startGateway();
+  const logged = await withWarnings(async () => {
+    assert.equal(zoroval.init({ apiKey: KEY, ingestUrl: gateway.url, ...fast, captureContent: false }), false);
+  });
+  assert.equal(zoroval.status().active, false);
+  assert.match(logged.join("\n"), /captureContent was removed in 0.2.0/);
+  await gateway.close();
+});
+
+test("redact basic replaces level-1 values in input, output, tool calls, metadata and errors", async () => {
+  const { gateway, text, spans } = await run({ redact: "basic" }, async (turn) => {
+    turn.setMetadata({ email: "a@b.co", pnr: "8123456789" });
+  });
+  assert.ok(!text.includes("4111"), "card digits must not leave the app");
   const turn = spans.find((s) => s.name === "turn");
-  assert.equal(turn.attrs["zoroval.metadata"], '{"region":"eu"}'); // metadata is not prompt content
-  assert.equal(turn.attrs["zoroval.conversation.id"], "c");
+  assert.equal(turn.attrs["zoroval.input"], '"pay with my-card-[CARD]"');
+  assert.equal(turn.attrs["zoroval.redacted"], true);
+  assert.deepEqual(JSON.parse(turn.attrs["zoroval.metadata"]), { region: "eu", email: "[EMAIL]", pnr: "8123456789" });
+  const tool = spans.find((s) => s.name === "execute_tool charge");
+  assert.equal(tool.attrs["gen_ai.tool.call.arguments"], '{"card":"my-card-[CARD]"}');
+  assert.equal(zoroval.status().redact, "basic");
+  await gateway.close();
+});
+
+test("redact basic then the developer's function, which sees labels", async () => {
+  const seen = [];
+  const { gateway, spans } = await run({ redact: ["basic", (v) => { seen.push(v); return v; }] });
+  assert.ok(seen.includes("pay with my-card-[CARD]"));
+  assert.equal(spans.find((s) => s.name === "turn").attrs["zoroval.output"], '"ok my-card-[CARD]"');
+  assert.equal(zoroval.status().redact, "basic+function");
+  await gateway.close();
+});
+
+test("an invalid redact value keeps tracing off", async () => {
+  for (const bad of ["pii", 42, ["basic", "x"], [() => 1, () => 2], {}]) {
+    await withWarnings(async () => {
+      assert.equal(zoroval.init({ apiKey: KEY, ingestUrl: "http://127.0.0.1:9", redact: bad }), false, String(bad));
+    });
+    assert.equal(zoroval.status().active, false);
+  }
+});
+
+test("an error message is cleaned by redact basic", async () => {
+  const gateway = await startGateway();
+  zoroval.init({ apiKey: KEY, ingestUrl: gateway.url, ...fast, redact: "basic" });
+  await withWarnings(async () => {
+    await zoroval.turn({}, async () => { throw new Error("declined for a@b.co"); }).catch(() => {});
+    await zoroval.flush(3000);
+  });
+  const text = JSON.stringify(gateway.requests.map((r) => r.raw));
+  assert.ok(!text.includes("a@b.co"));
+  assert.ok(text.includes("[EMAIL]"));
   await gateway.close();
 });
 

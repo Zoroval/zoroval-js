@@ -144,9 +144,9 @@ export function applyRedact(redact: Redact, value: unknown): [unknown, boolean, 
 /** Serialize content for a span attribute. Returns text=null when nothing is sent. */
 export function capture(
   value: unknown,
-  options: { captureContent: boolean; redact: Redact; limit: number },
+  options: { redact: Redact; limit: number },
 ): Captured {
-  if (!options.captureContent || value === null || value === undefined) {
+  if (value === null || value === undefined) {
     return { text: null, redacted: false, truncatedBytes: 0 };
   }
   const [next, redacted, ok] = applyRedact(options.redact, value);

@@ -312,18 +312,19 @@ for (const { label, OpenAI } of packages) {
     await gateway.close();
   });
 
-  test("captureContent: false sends no messages, tool arguments or definitions; redact runs on content", async () => {
-    const gateway = await setup({ captureContent: false });
+  test("redact basic cleans messages and keeps tool calls and numbers", async () => {
+    const gateway = await setup({ redact: "basic" });
     const openai = zoroval.wrapOpenAI(client());
     await zoroval.conversation("p1", async () => {
       await zoroval.turn({}, async () => {
-        await openai.chat.completions.create({ model: "gpt-test", messages: [{ role: "user", content: "weather in Paris" }], tools: [{ type: "function", function: { name: "get_weather" } }] });
+        await openai.chat.completions.create({ model: "gpt-test", messages: [{ role: "user", content: "weather in Paris, mail priya@example.com" }], tools: [{ type: "function", function: { name: "get_weather" } }] });
       });
     });
     await zoroval.flush(3000);
     const [g] = gens(gateway);
-    for (const key of ["gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.tool.definitions"]) assert.ok(!(key in g.attrs), key);
-    assert.deepEqual(parsed(g.attrs["zoroval.tool_calls"]), [{ id: "call_abc123", name: "get_weather" }], "ids and names only, no arguments");
+    assert.ok(!JSON.stringify(g.attrs).includes("priya@example.com"));
+    assert.match(g.attrs["gen_ai.input.messages"], /weather in Paris, mail \[EMAIL\]/);
+    assert.equal(parsed(g.attrs["zoroval.tool_calls"])[0].name, "get_weather");
     assert.equal(g.attrs["gen_ai.usage.input_tokens"], 21, "numbers are still sent");
     await gateway.close();
   });
