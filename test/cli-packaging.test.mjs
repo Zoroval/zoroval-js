@@ -9,7 +9,7 @@ const dist = (name) => readFileSync(new URL(`../dist/${name}`, import.meta.url),
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 test("the bin entry exists, is executable, starts with a Node shebang, and is ESM", () => {
-  assert.equal(pkg.bin.zoroval, "./dist/cli.js");
+  assert.equal(pkg.bin.zoroval, "dist/cli.js"); // npm normalizes away a leading ./
   const text = dist("cli.js");
   assert.ok(text.startsWith("#!/usr/bin/env node\n"));
   assert.ok(statSync(new URL("../dist/cli.js", import.meta.url)).mode & 0o111, "not executable");
