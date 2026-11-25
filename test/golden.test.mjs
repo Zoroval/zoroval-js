@@ -69,17 +69,11 @@ for (const mode of ["wrap", "fetch"]) {
         // The error text and class come from each language's openai library, so only the shape is compared.
         assert.equal(py.status, "ERROR");
         assert.equal(ts.status.code, 2);
-        if (mode === "wrap") {
-          assert.deepEqual(ts.events.map((e) => e.name), ["exception"]);
-          assert.match(ts.status.message, /^RateLimitError: /);
-          assert.equal(ts.attrs["error.type"], py.attributes["error.type"]);
-        } else {
-          // Over plain fetch the app gets the HTTP response, not an exception: no exception event, the
-          // provider's own message and error type.
-          assert.equal(ts.events, undefined);
-          assert.match(ts.status.message, /^429 Rate limit reached/);
-          assert.equal(ts.attrs["error.type"], "requests");
-        }
+        // Both wrappers record the error the openai library throws for the status: one exception event,
+        // `RateLimitError` as the type (Python records the same class name).
+        assert.deepEqual(ts.events.map((e) => e.name), ["exception"]);
+        assert.match(ts.status.message, mode === "wrap" ? /^RateLimitError: / : /^RateLimitError: 429 Rate limit reached/);
+        assert.equal(ts.attrs["error.type"], py.attributes["error.type"]);
         for (const key of Object.keys(py.attributes)) {
           if (!VOLATILE.has(key) && key !== "error.type") assert.deepEqual(ts.attrs[key], py.attributes[key], `${scenario.name}: ${key}`);
         }

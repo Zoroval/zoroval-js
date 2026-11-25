@@ -80,35 +80,53 @@ test("responses over fetch: stream and non-stream", async () => {
   await gateway.close();
 });
 
-test("responses: OpenAI's built-in tools (web search, file search, MCP) are tool calls with their query, in output and input", async () => {
+test("responses: one assistant message per output item; built-in tools carry their query and result; annotations stay; history maps the same", async () => {
   const gateway = await setup();
-  const body = {
-    id: "resp_ws", model: "gpt-test", usage: { input_tokens: 5, output_tokens: 7 },
-    output: [
-      { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", query: "Lord's stadium events" } },
-      { type: "file_search_call", id: "fs_1", status: "completed", queries: ["ticket policy"] },
-      { type: "mcp_call", id: "mcp_1", name: "lookup", arguments: '{"q":"x"}', server_label: "s" },
-      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Check with the organiser." }] },
-    ],
-  };
+  const cite = { type: "url_citation", url: "https://lords.org/events", title: "Events", start_index: 0, end_index: 5 };
+  const output = [
+    { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "Search first." }] },
+    { type: "web_search_call", id: "ws_1", status: "completed",
+      action: { type: "search", query: "Lord's stadium events", sources: [{ type: "url", url: "https://lords.org/events" }] } },
+    { type: "file_search_call", id: "fs_1", status: "completed", queries: ["ticket policy"], results: [{ filename: "policy.md", score: 0.9, text: "No refunds." }] },
+    { type: "code_interpreter_call", id: "ci_1", status: "completed", code: "print(1)", outputs: [{ type: "logs", logs: "1" }, { type: "image", url: "data:image/png;base64,AAAA" }] },
+    { type: "mcp_call", id: "mcp_1", name: "lookup", arguments: '{"q":"x"}', server_label: "s", error: { message: "server down" } },
+    { type: "image_generation_call", id: "ig_1", status: "completed", result: "iVBORw0KGgo" },
+    { type: "function_call", id: "fc_1", call_id: "call_1", name: "book", arguments: '{"seat":"A1"}' },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Check with the organiser.", annotations: [cite] }] },
+  ];
+  const body = { id: "resp_ws", model: "gpt-test", status: "completed", usage: { input_tokens: 5, output_tokens: 7 }, output };
   const inner = async () => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
   const tracedFetch = zoroval.wrapFetch(inner);
   await zoroval.turn({}, async () => {
-    const history = [{ role: "user", content: "hi" }, { type: "web_search_call", id: "ws_0", status: "completed", action: { type: "search", query: "earlier" } }];
+    // The app sends the previous reply back as history, the way the Responses docs show.
+    const history = [{ role: "user", content: "hi" }, ...output, { type: "function_call_output", call_id: "call_1", output: "booked" }];
     await (await tracedFetch("https://api.openai.com/v1/responses", { method: "POST", body: JSON.stringify({ model: "gpt-test", input: history, tools: [{ type: "web_search" }] }) })).json();
   });
   await zoroval.flush(3000);
   const [gen] = gens(gateway);
-  const out = parsed(gen.attrs["gen_ai.output.messages"])[0].parts;
-  assert.deepEqual(out.slice(0, 3), [
-    { type: "tool_call", id: "ws_1", name: "web_search", arguments: '{"type":"search","query":"Lord\'s stadium events"}' },
-    { type: "tool_call", id: "fs_1", name: "file_search", arguments: '["ticket policy"]' },
-    { type: "tool_call", id: "mcp_1", name: "lookup", arguments: '{"q":"x"}' },
+  const out = parsed(gen.attrs["gen_ai.output.messages"]);
+  assert.equal(out.length, output.length, "one message per output item");
+  assert.ok(out.every((m) => m.role === "assistant"));
+  assert.deepEqual(out.map((m) => m.finish_reason ?? null), [null, null, null, null, null, null, null, "completed"]);
+  assert.deepEqual(out[0].parts, [{ type: "reasoning", content: "Search first." }]);
+  assert.deepEqual(out[1].parts, [
+    { type: "tool_call", id: "ws_1", name: "web_search", arguments: '{"query":"Lord\'s stadium events"}' },
+    { type: "tool_call_response", id: "ws_1", response: [{ type: "url", url: "https://lords.org/events" }] },
   ]);
-  assert.equal(out[3].content, "Check with the organiser.");
-  assert.deepEqual(parsed(gen.attrs["zoroval.tool_calls"]).map((c) => c.name), ["web_search", "file_search", "lookup"]);
+  assert.deepEqual(out[2].parts, [
+    { type: "tool_call", id: "fs_1", name: "file_search", arguments: '["ticket policy"]' },
+    { type: "tool_call_response", id: "fs_1", response: [{ filename: "policy.md", score: 0.9, text: "No refunds." }] },
+  ]);
+  assert.deepEqual(out[3].parts[1], { type: "tool_call_response", id: "ci_1", response: [{ type: "logs", logs: "1" }, "[image omitted]"] });
+  assert.deepEqual(out[4].parts[1], { type: "tool_call_response", id: "mcp_1", response: { message: "server down" }, is_error: true });
+  assert.deepEqual(out[5].parts, [{ type: "tool_call", id: "ig_1", name: "image_generation", arguments: "{}" }, { type: "tool_call_response", id: "ig_1", response: "[image omitted]" }]);
+  assert.deepEqual(out[6].parts, [{ type: "tool_call", id: "call_1", name: "book", arguments: '{"seat":"A1"}' }]);
+  assert.deepEqual(out[7].parts, [{ type: "text", content: "Check with the organiser.", annotations: [cite] }]);
+  assert.deepEqual(parsed(gen.attrs["zoroval.tool_calls"]).map((c) => c.name), ["web_search", "file_search", "code_interpreter", "lookup", "image_generation", "book"]);
+  // The same items sent back as history give the same messages, so the reader can match them.
   const input = parsed(gen.attrs["gen_ai.input.messages"]);
-  assert.deepEqual(input[1], { role: "assistant", parts: [{ type: "tool_call", id: "ws_0", name: "web_search", arguments: '{"type":"search","query":"earlier"}' }] });
+  assert.deepEqual(input.slice(1, 1 + output.length), out.map(({ finish_reason, ...m }) => m));
+  assert.deepEqual(input.at(-1), { role: "tool", parts: [{ type: "tool_call_response", id: "call_1", response: "booked" }] });
   await gateway.close();
 });
 
@@ -186,8 +204,10 @@ test("provider errors: the app gets the 429 response unchanged, the span has ERR
   await zoroval.flush(3000);
   const [limited, failed] = gens(gateway).sort((a, b) => a.startTimeUnixNano.localeCompare(b.startTimeUnixNano));
   assert.equal(limited.status.code, 2);
-  assert.match(limited.status.message, /^429 Rate limit reached/);
-  assert.equal(limited.attrs["error.type"], "requests");
+  // Named by the HTTP status the way the openai package names its error, not by the body's `type` ("requests").
+  assert.equal(limited.status.message, "RateLimitError: 429 Rate limit reached");
+  assert.equal(limited.attrs["error.type"], "RateLimitError");
+  assert.deepEqual(limited.events.map((e) => [e.name, e.attributes.find((a) => a.key === "exception.type").value.stringValue]), [["exception", "RateLimitError"]]);
   assert.equal(failed.status.code, 2);
   assert.equal(failed.attrs["error.type"], "TypeError");
   await gateway.close();
@@ -276,5 +296,83 @@ test("a streamed tool call is linked to a tool() that runs the moment the app ha
   const tools = gateway.spans().filter((s) => s.name === "execute_tool get_weather");
   assert.equal(tools.length, 20);
   assert.ok(tools.every((t) => t.attrs["gen_ai.tool.call.id"] === "call_abc123"), "all 20 linked");
+  await gateway.close();
+});
+
+const sse = (chunks) => new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+const json = (body) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+
+test("OpenAI-compatible providers: reasoning (DeepSeek, OpenRouter) in replies, streams and history; Groq stream usage; provider from the host", async () => {
+  const gateway = await setup();
+  const replies = {
+    "https://api.deepseek.com/chat/completions": json({ id: "ds1", model: "deepseek-reasoner", usage: { prompt_tokens: 3, completion_tokens: 4 },
+      choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "Mornings.", reasoning_content: "Peak hours are 8 to 10." } }] }),
+    "https://openrouter.ai/api/v1/chat/completions": sse([
+      { id: "or1", model: "x", choices: [{ index: 0, delta: { role: "assistant", reasoning: "Think ", reasoning_details: [{ type: "reasoning.text", text: "Think " }] } }] },
+      { id: "or1", choices: [{ index: 0, delta: { reasoning: "twice.", reasoning_details: [{ type: "reasoning.text", text: "twice." }] } }] },
+      { id: "or1", choices: [{ index: 0, delta: { content: "Done." }, finish_reason: "stop" }] },
+    ]),
+    "https://api.groq.com/openai/v1/chat/completions": sse([
+      { id: "gq1", model: "llama", choices: [{ index: 0, delta: { content: "Hi" } }] },
+      { id: "gq1", choices: [{ index: 0, delta: { reasoning_details: [{ type: "reasoning.summary", summary: "Greeted." }] }, finish_reason: "stop" }], x_groq: { usage: { prompt_tokens: 9, completion_tokens: 2 } } },
+    ]),
+  };
+  const inner = async (url) => replies[String(url)];
+  const tracedFetch = zoroval.wrapFetch(inner, { baseURLs: ["https://api.deepseek.com", "https://openrouter.ai/api/v1", "https://api.groq.com/openai/v1"] });
+  const history = [{ role: "user", content: "When?" }, { role: "assistant", content: "Mornings.", reasoning_content: "Peak hours are 8 to 10." }, { role: "user", content: "Sure?" }];
+  await zoroval.turn({}, async () => {
+    await (await post(tracedFetch, "/chat/completions", { model: "deepseek-reasoner", messages: history }, "https://api.deepseek.com")).json();
+    await (await post(tracedFetch, "/chat/completions", { model: "x", stream: true, messages: history }, "https://openrouter.ai/api/v1")).text();
+    await (await post(tracedFetch, "/chat/completions", { model: "llama", stream: true, messages: history }, "https://api.groq.com/openai/v1")).text();
+  });
+  await zoroval.flush(3000);
+  const [ds, or, gq] = gens(gateway).sort((a, b) => a.startTimeUnixNano.localeCompare(b.startTimeUnixNano));
+  assert.deepEqual([ds, or, gq].map((g) => g.attrs["gen_ai.provider.name"]), ["deepseek", "openrouter", "groq"]);
+  assert.deepEqual(parsed(ds.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Peak hours are 8 to 10." }, { type: "text", content: "Mornings." }]);
+  assert.deepEqual(parsed(ds.attrs["gen_ai.input.messages"])[1].parts, [{ type: "reasoning", content: "Peak hours are 8 to 10." }, { type: "text", content: "Mornings." }]);
+  // `reasoning` and `reasoning_details` carry the same text on OpenRouter: it is recorded once.
+  assert.deepEqual(parsed(or.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Think twice." }, { type: "text", content: "Done." }]);
+  assert.deepEqual(parsed(gq.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Greeted." }, { type: "text", content: "Hi" }]);
+  assert.equal(gq.attrs["gen_ai.usage.input_tokens"], 9);
+  assert.equal(gq.attrs["gen_ai.usage.output_tokens"], 2);
+  await gateway.close();
+});
+
+test("chat completions: annotations stay on the text part, in replies and in history", async () => {
+  const gateway = await setup();
+  const cite = { type: "url_citation", url_citation: { url: "https://example.org", title: "Ex", start_index: 0, end_index: 4 } };
+  const message = { role: "assistant", content: "Ex says yes.", annotations: [cite] };
+  const inner = async (_, init) => (JSON.parse(init.body).stream
+    ? sse([{ id: "c2", choices: [{ index: 0, delta: { content: "Ex says yes.", annotations: [cite] }, finish_reason: "stop" }] }])
+    : json({ id: "c1", model: "gpt-4o-search-preview", choices: [{ index: 0, finish_reason: "stop", message }] }));
+  const tracedFetch = zoroval.wrapFetch(inner);
+  await zoroval.turn({}, async () => {
+    await (await post(tracedFetch, "/chat/completions", { model: "m", messages: [{ role: "user", content: "q" }] }, "https://api.openai.com/v1")).json();
+    await (await post(tracedFetch, "/chat/completions", { model: "m", stream: true, messages: [{ role: "user", content: "q" }, message] }, "https://api.openai.com/v1")).text();
+  });
+  await zoroval.flush(3000);
+  const [a, b] = gens(gateway).sort((x, y) => x.startTimeUnixNano.localeCompare(y.startTimeUnixNano));
+  const part = { type: "text", content: "Ex says yes.", annotations: [cite] };
+  assert.deepEqual(parsed(a.attrs["gen_ai.output.messages"])[0].parts, [part]);
+  assert.deepEqual(parsed(b.attrs["gen_ai.output.messages"])[0].parts, [part]);
+  assert.deepEqual(parsed(b.attrs["gen_ai.input.messages"])[1].parts, [part]);
+  assert.equal(a.attrs["gen_ai.provider.name"], "openai");
+  await gateway.close();
+});
+
+test("wrapOpenAI: the provider comes from the client's base URL host; Azure and unknown hosts as before", async () => {
+  const gateway = await setup();
+  const toFake = (base) => (url, init) => globalThis.fetch(String(url).replace(base, fake.url), init);
+  const groq = zoroval.wrapOpenAI(new OpenAI({ apiKey: "k", maxRetries: 0, baseURL: "https://api.groq.com/openai/v1", fetch: toFake("https://api.groq.com/openai/v1") }));
+  const local = zoroval.wrapOpenAI(new OpenAI({ apiKey: "k", maxRetries: 0, baseURL: fake.url }));
+  await zoroval.turn({}, async () => {
+    await groq.chat.completions.create({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] });
+    await local.chat.completions.create({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] });
+  });
+  await zoroval.flush(3000);
+  const [a, b] = gens(gateway).sort((x, y) => x.startTimeUnixNano.localeCompare(y.startTimeUnixNano));
+  assert.equal(a.attrs["gen_ai.provider.name"], "groq");
+  assert.equal(a.attrs["server.address"], "api.groq.com");
+  assert.equal(b.attrs["gen_ai.provider.name"], "openai");
   await gateway.close();
 });

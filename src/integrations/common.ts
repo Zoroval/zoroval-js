@@ -221,3 +221,142 @@ export function mediaPart(kind: string, detail: unknown = null): Json {
   if (typeof detail === "string" && detail && !detail.startsWith("data:")) part.uri = detail;
   return part;
 }
+
+/** Rebuilds a streamed reply from its events; `finish` runs once. */
+export interface StreamState {
+  observe(event: Json): void;
+  finish(error?: unknown): void;
+}
+
+/** How one provider API reads a request and its result (openai.ts, anthropic.ts). */
+export interface CallMapper {
+  start(body: Json): Generation;
+  finish(gen: Generation, result: Json): void;
+  stream(gen: Generation): StreamState;
+}
+
+const WRAPPED = Symbol.for("zoroval.wrapped");
+type Fn = (this: unknown, ...args: unknown[]) => unknown;
+
+const isStream = (value: Json): boolean =>
+  value !== null && typeof value === "object" && !("choices" in value) && !("output" in value) && !("content" in value) &&
+  (typeof value[Symbol.asyncIterator] === "function" || typeof value.iterator === "function");
+
+/** Watch the events of the provider's stream object in place; the app keeps reading the same object. */
+function watchStream(stream: Json, gen: Generation, state: StreamState): void {
+  const watch = (make: () => Json) => () => watchIterator(make(), gen, state.observe, state.finish);
+  // The Stainless clients (openai, @anthropic-ai/sdk) keep the generator in `iterator`; `tee()` calls it
+  // directly, `for await` goes through Symbol.asyncIterator, which calls it too.
+  if (typeof stream.iterator === "function") {
+    const original = stream.iterator;
+    stream.iterator = watch(() => original.call(stream));
+  } else {
+    const original = stream[Symbol.asyncIterator];
+    stream[Symbol.asyncIterator] = watch(() => original.call(stream));
+  }
+}
+
+/**
+ * Attach the span to the provider's returned promise without changing it. A Stainless `APIPromise`
+ * reads the body only through `parse()`, so that is where the parsed value is seen; `asResponse()`
+ * (raw body for the app) ends the span without content. The libraries' helpers derive new promises
+ * with `_thenUnwrap()`: those are hooked the same way. Any other promise is observed with `then`.
+ */
+function observeCall(call: Json, gen: Generation, mapper: CallMapper, where: string): void {
+  let seen = false;
+  const onValue = (value: Json) => {
+    if (seen) return;
+    seen = true;
+    try {
+      if (value === null) gen.finish(); // raw response: the app reads the bytes itself
+      else if (isStream(value)) watchStream(value, gen, mapper.stream(gen));
+      else mapper.finish(gen, value);
+    } catch (error) {
+      internalError(`${where}.finish`, error);
+      gen.finish();
+    }
+  };
+  const onError = (error: unknown) => {
+    if (seen) return;
+    seen = true;
+    gen.fail(error);
+  };
+  const hook = (promise: Json): void => {
+    const { parse, asResponse, _thenUnwrap } = promise;
+    let requested = false;
+    promise.parse = function (this: unknown, ...args: unknown[]) {
+      const result = parse.apply(this, args);
+      if (!requested) {
+        requested = true;
+        (result as Promise<unknown>).then(onValue, onError);
+      }
+      return result;
+    };
+    promise.asResponse = function (this: unknown, ...args: unknown[]) {
+      const result = asResponse.apply(this, args);
+      if (!requested) {
+        requested = true;
+        (result as Promise<unknown>).then(() => onValue(null), onError);
+      }
+      return result;
+    };
+    if (typeof _thenUnwrap === "function") {
+      promise._thenUnwrap = function (this: unknown, ...args: unknown[]) {
+        const derived = _thenUnwrap.apply(this, args);
+        if (derived && typeof derived.parse === "function") hook(derived);
+        return derived;
+      };
+    }
+  };
+  if (call && typeof call.parse === "function" && typeof call.asResponse === "function") hook(call);
+  else if (call && typeof call.then === "function") call.then(onValue, onError);
+}
+
+/**
+ * Patch `owner[method]` of one client instance. The wrap checks the SDK state on each call: `init()` may
+ * run after a module-level wrap, and with no key the call goes straight to the original method.
+ */
+export function wrapMethod(owner: Json, method: string, mapper: CallMapper, where: string): void {
+  const original = owner?.[method] as Fn | undefined;
+  if (typeof original !== "function" || (original as Json)[WRAPPED]) return;
+  const wrapper: Fn = function (this: unknown, ...args) {
+    if (!getState()) return original.apply(this, args);
+    let gen: Generation | undefined;
+    try {
+      gen = mapper.start(args[0]);
+    } catch (error) {
+      internalError(`${where}.start`, error);
+    }
+    if (!gen || !gen.active) return original.apply(this, args);
+    let call: unknown;
+    try {
+      call = gen.run(() => original.apply(this, args));
+    } catch (error) {
+      gen.fail(error);
+      throw error;
+    }
+    safe(`${where}.observe`, () => observeCall(call, gen!, mapper, where));
+    return call;
+  };
+  (wrapper as Json)[WRAPPED] = true;
+  owner[method] = wrapper;
+}
+
+/** Host of a client's base URL, and its port when the URL names one. */
+export function hostOf(baseURL: unknown): { host?: string; port?: number } {
+  try {
+    const url = new URL(String(baseURL));
+    return url.port ? { host: url.hostname, port: Number(url.port) } : { host: url.hostname };
+  } catch {
+    return {};
+  }
+}
+
+/** Drop the opaque `encrypted_*` fields providers attach to search results and citations. */
+export function withoutEncrypted(value: Json): Json {
+  if (Array.isArray(value)) return value.map(withoutEncrypted);
+  if (value === null || typeof value !== "object") return value;
+  const out: Json = {};
+  for (const [key, item] of Object.entries(value)) if (!key.startsWith("encrypted_")) out[key] = withoutEncrypted(item);
+  return out;
+}

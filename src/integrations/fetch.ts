@@ -12,7 +12,8 @@
  *   a stream does not stop our half: it reads on until the provider ends the stream.
  * - A request the app cannot be told apart from (not POST, a URL that is not an OpenAI chat or
  *   responses endpoint, a body that is not JSON) is passed straight to `fetch`, same call, same result.
- * - An HTTP error response (4xx, 5xx) sets ERROR status with the provider's message and `error.type`.
+ * - An HTTP error response (4xx, 5xx) is recorded as the error the `openai` package throws for that status
+ *   (`RateLimitError`, `429 <provider message>`): ERROR status, `error.type` and an `exception` event.
  * - If a generation span is already open (`wrapOpenAI` over the same call), no second span is made.
  */
 
@@ -21,7 +22,7 @@ import { getState, tracingOff } from "../state.js";
 import { FETCH_INNER, internalError, untracedFetch } from "../util.js";
 import { Generation, get } from "./common.js";
 import type { Json } from "./common.js";
-import { finishResult, startCall, streamState } from "./openai.js";
+import { finishResult, providerOfHost, startCall, streamState } from "./openai.js";
 import type { Api, Endpoint } from "./openai.js";
 
 export interface WrapFetchOptions {
@@ -56,7 +57,7 @@ function match(url: URL, bases: URL[]): Match | null {
     const rest = url.pathname.slice(prefix.length).replace(/\/+$/, "");
     const api: Api | null = rest === "/chat/completions" ? "chat" : rest === "/responses" ? "responses" : null;
     if (!api) continue;
-    const provider = url.hostname.includes("azure") ? "azure.ai.openai" : "openai";
+    const provider = providerOfHost(url.hostname);
     return { api, endpoint: { api, provider, host: url.hostname, ...(url.port ? { port: Number(url.port) } : {}) } };
   }
   return null;
@@ -120,6 +121,18 @@ async function readEvents(body: ReadableStream<Uint8Array>, onEvent: (event: Jso
   if (buffer.trim()) dispatch(buffer);
 }
 
+/** The openai package's error class for an HTTP status. */
+function errorClass(status: number): string {
+  const named: Record<number, string> = {
+    400: "BadRequestError", 401: "AuthenticationError", 403: "PermissionDeniedError", 404: "NotFoundError", 409: "ConflictError",
+    422: "UnprocessableEntityError", 429: "RateLimitError",
+  };
+  return named[status] ?? (status >= 500 ? "InternalServerError" : "APIError");
+}
+
+// No stack: it would only show the SDK's own frames.
+const apiError = (name: string, message: string): Error => Object.assign(new Error(message), { name, stack: "" });
+
 /**
  * Read our copy of the response. Returns a promise that settles when the span is finished, and
  * whether the body is a stream: a stream is read in the background, anything else the caller waits for.
@@ -131,17 +144,13 @@ function observeResponse(response: Response, gen: Generation, api: Api, signal?:
     try {
       if (!response.ok) {
         let message = "";
-        let type: unknown = null;
         try {
-          const error = get(JSON.parse(await copy.text()), "error");
-          message = String(get(error, "message") ?? "");
-          type = get(error, "type") ?? get(error, "code");
+          message = String(get(get(JSON.parse(await copy.text()), "error"), "message") ?? "");
         } catch {
           /* not JSON: the status alone */
         }
-        gen.set("error.type", String(type ?? response.status));
-        gen.setError(`${response.status} ${message}`.trim());
-        gen.finish();
+        // The error the openai package would have thrown for this status, so both wrappers record the same.
+        gen.fail(apiError(errorClass(response.status), `${response.status} ${message}`.trim()));
       } else if (stream) {
         const state = streamState(gen, api);
         let failure: unknown;
@@ -154,7 +163,7 @@ function observeResponse(response: Response, gen: Generation, api: Api, signal?:
               internalError("fetch.observe", error);
             }
             const error = api === "chat" ? get(event, "error") : null;
-            if (error) failure = Object.assign(new Error(String(get(error, "message") ?? "stream error")), { name: String(get(error, "type") ?? "APIError") });
+            if (error) failure = apiError("APIError", String(get(error, "message") ?? "stream error"));
           });
         } catch (error) {
           // The app aborted the request: that is not a provider failure. (Node 18 rejects our half of the
