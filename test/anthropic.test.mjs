@@ -180,3 +180,18 @@ test("a client that is not an Anthropic client is returned as is and never throw
   }
   await gateway.close();
 });
+
+sdkTest("a web_fetch result holding a PDF keeps the document's shape with the base64 data replaced; beta.messages is traced too", async () => {
+  const gateway = await setup();
+  const anthropic = zoroval.wrapAnthropic(client());
+  const pdf = { type: "web_fetch_tool_result", tool_use_id: "srvtoolu_9", content: { type: "web_fetch_result", url: "https://x.org/a.pdf",
+    content: { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK".repeat(50) }, title: "A" } } };
+  await anthropic.beta.messages.create({ model: "claude-test", max_tokens: 10, messages: [{ role: "user", content: "read it" }, { role: "assistant", content: [pdf] }, { role: "user", content: "and?" }] });
+  await zoroval.flush(3000);
+  const [gen] = gens(gateway);
+  assert.equal(gen.attrs["gen_ai.provider.name"], "anthropic");
+  const part = parsed(gen.attrs["gen_ai.input.messages"])[1].parts[0];
+  assert.deepEqual(part.response.content.source, { type: "base64", media_type: "application/pdf", data: "[application/pdf omitted]" });
+  assert.doesNotMatch(gen.attrs["gen_ai.input.messages"], /JVBERi0/);
+  await gateway.close();
+});

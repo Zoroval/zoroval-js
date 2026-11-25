@@ -352,11 +352,17 @@ export function hostOf(baseURL: unknown): { host?: string; port?: number } {
   }
 }
 
-/** Drop the opaque `encrypted_*` fields providers attach to search results and citations. */
+/**
+ * A provider-run tool's result as content: the opaque `encrypted_*` fields providers attach to search results
+ * and citations are dropped, and base64 data (a fetched PDF or image) becomes a placeholder.
+ */
 export function withoutEncrypted(value: Json): Json {
   if (Array.isArray(value)) return value.map(withoutEncrypted);
   if (value === null || typeof value !== "object") return value;
   const out: Json = {};
-  for (const [key, item] of Object.entries(value)) if (!key.startsWith("encrypted_")) out[key] = withoutEncrypted(item);
+  for (const [key, item] of Object.entries(value)) {
+    if (key.startsWith("encrypted_")) continue;
+    out[key] = key === "data" && value.type === "base64" ? `[${value.media_type ?? "file"} omitted]` : withoutEncrypted(item);
+  }
   return out;
 }

@@ -239,6 +239,20 @@ test("AI SDK beside a direct OpenAI call: the SDK steps for the direct call, the
   assert.ok(!out.plan.some((step) => step.startsWith("No `zoroval` package")));
 });
 
+test("Python model calls beside an AI SDK web app: Python steps, then the AI SDK steps (case 6 is kept)", () => {
+  const files = {
+    "requirements.txt": "openai\n",
+    "chat.py": "from openai import OpenAI\nclient = OpenAI()\ndef ask(chat_id):\n    return client.chat.completions.create(model=\"m\", messages=[])\n",
+    "web/package.json": JSON.stringify({ dependencies: { ai: "^7.0.0", next: "16.0.0" } }),
+  };
+  const out = JSON.parse(detect(makeProject({ files }), "--json").stdout);
+  assert.deepEqual(out.cases, [1, 6, 9]);
+  assert.equal(out.tracing.vercel_ai, undefined, "a Python project's report keeps the Python CLI's keys");
+  assert.equal(out.plan[0], "Add `zoroval` to the Python dependencies.");
+  assert.ok(out.plan.includes("TypeScript: the app needs no `zoroval` npm package; its traces go to Zoroval over OpenTelemetry."));
+  assert.ok(out.plan.some((step) => step.includes("registerTelemetry(new OpenTelemetry({ runtimeContext: true }))")));
+});
+
 test("a destructured { id, messages } body names id; other ids do not", () => {
   const files = {
     "package.json": JSON.stringify({ dependencies: { openai: "^5.0.0" } }),
