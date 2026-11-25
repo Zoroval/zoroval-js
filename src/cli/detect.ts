@@ -8,8 +8,9 @@
  *
  * TypeScript additions: `llm_calls`, `chat_id_candidates` and `entry_points` also cover `.ts`, `.tsx`,
  * `.js`, `.mjs` and `.cjs` files; env files include `.dev.vars*`; a Worker adds `typescript.worker` (its
- * compatibility flags and whether turns can be grouped), Next.js adds `typescript.nextjs`; and `plan`
- * is written for TypeScript projects (`wrapOpenAI`, `conversation()`, flushing).
+ * compatibility flags and whether turns can be grouped), Next.js adds `typescript.nextjs`, the Vercel AI SDK adds
+ * `tracing.vercel_ai`; and `plan` is written for TypeScript projects (`wrapOpenAI`, `wrapAnthropic`,
+ * `conversation()`, flushing; for an AI SDK app, the OpenTelemetry route of its major version and no package).
  */
 
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -353,7 +354,9 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
   const tsOpenAICalls: Json[] = [];
   const tsChatIds: Json[] = [];
   for (const [file, result] of tsScans) {
-    for (const [line, api, base] of result.llmCalls) tsOpenAICalls.push({ file, line, provider: "openai", api, ...(base ? { base_url: base } : {}) });
+    for (const [line, api, base] of result.llmCalls) {
+      tsOpenAICalls.push({ file, line, provider: api.startsWith("messages.") ? "anthropic" : "openai", api, ...(base ? { base_url: base } : {}) });
+    }
     for (const [line, name] of result.chatIds) tsChatIds.push({ file, line, name });
   }
   // The conversation id is read where the model is called: server files first (an entry point, a handler or a
@@ -468,7 +471,7 @@ export function analyze(rootArg: string): { report: Json; info: ProjectInfo } {
     ];
   }
   const serviceFor = (file: string): string => (isTsFile(file) ? serviceOf(file) : pythonManifests.map((s) => s.path as string).sort((a, b) => b.length - a.length).find((p) => p === "." || file.startsWith(p + "/")) ?? ".");
-  classify(report, pyPackages, jsPackages, imports, includeTs && tsOpenAICalls.length > 0, includeTs, lang, worker, workerRelevant, nextProject, serviceFor);
+  classify(report, pyPackages, jsPackages, imports, includeTs ? tsOpenAICalls : [], includeTs, lang, worker, workerRelevant, nextProject, serviceFor);
   return { report, info: { lang, worker, workerRelevant, nextProject } };
 }
 
@@ -525,17 +528,22 @@ function addFrameworkEntryPoints(report: Json, scans: Map<string, ReturnType<typ
 
 const has = (packages: Record<string, string>, ...names: string[]): boolean => names.some((n) => norm(n) in packages);
 
-function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsOpenAI: boolean, includeTs: boolean, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, serviceFor: (file: string) => string): void {
+function classify(report: Json, py: Record<string, string>, js: Record<string, string>, imports: Record<string, string[]>, tsCalls: Json[], includeTs: boolean, lang: Lang, worker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, serviceFor: (file: string) => string): void {
   const cases: (number | string)[] = [];
   const explain: (number | string)[] = [];
   const notes: string[] = report.notes;
   const tracing = report.tracing;
   const signals = new Set<string>((tracing.code_signals ?? []).map((s: Json) => String(s.signal).split(":")[0]));
 
-  const usesOpenai = has(py, "openai") || "openai" in imports || (includeTs && "openai" in js) || tsOpenAI;
-  const usesAnthropic = has(py, "anthropic") || "anthropic" in imports;
+  const usesOpenai = has(py, "openai") || "openai" in imports || (includeTs && "openai" in js) || tsCalls.some((c) => c.provider === "openai");
+  const usesAnthropic = has(py, "anthropic") || "anthropic" in imports || (includeTs && "@anthropic-ai/sdk" in js) || tsCalls.some((c) => c.provider === "anthropic");
+  // TypeScript code that calls OpenAI or Anthropic itself gets the zoroval package; an app that only goes through
+  // the Vercel AI SDK (or another provider) is case 6 and needs no package.
+  const tsDirect = includeTs && (tsCalls.length > 0 || "openai" in js || "@anthropic-ai/sdk" in js);
+  const aiSdk = includeTs && "ai" in js;
   tracing.openai = usesOpenai;
   tracing.anthropic = usesAnthropic;
+  if (aiSdk) tracing.vercel_ai = { spec: js.ai, major: major(js.ai) };
 
   const langfuseSpec = py.langfuse;
   if (langfuseSpec !== undefined || "langfuse" in imports) {
@@ -568,7 +576,8 @@ function classify(report: Json, py: Record<string, string>, js: Record<string, s
     tracing.langsmith = true;
     explain.push(5);
   }
-  if (Object.keys(js).some((k) => k === "ai" || k === "@vercel/otel" || k.startsWith("@opentelemetry/"))) cases.push(6);
+  // A TypeScript app that calls OpenAI or Anthropic directly is case 1, even with OpenTelemetry packages.
+  if (aiSdk || (!tsDirect && Object.keys(js).some((k) => k === "@vercel/otel" || k.startsWith("@opentelemetry/")))) cases.push(6);
   if (report.serverless.length || Object.keys(report.servers).length) cases.push(7);
   if (report.services.length > 1) explain.push(8);
   if ((usesOpenai || usesAnthropic) && ![2, 3, 4].some((c) => cases.includes(c)) && !explain.includes("2b")) cases.push(1);
@@ -587,12 +596,12 @@ function classify(report: Json, py: Record<string, string>, js: Record<string, s
   if (worker && workerRelevant && !worker.als) {
     notes.push(`${worker.file} has neither the nodejs_als nor the nodejs_compat compatibility flag: turns will not be grouped into conversations. Add nodejs_als to compatibility_flags.`);
   }
-  report.plan = makePlan(report, lang, worker, workerRelevant, nextProject, usesOpenai, serviceFor);
+  report.plan = makePlan(report, lang, worker, workerRelevant, nextProject, usesOpenai, serviceFor, tsDirect);
 }
 
 const isTsFile = (file: string): boolean => TS_EXT.some((ext) => file.endsWith(ext));
 
-function makePlan(report: Json, lang: Lang, rawWorker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, serviceFor: (file: string) => string): string[] {
+function makePlan(report: Json, lang: Lang, rawWorker: Wrangler | null, workerRelevant: boolean, nextProject: boolean, usesOpenai: boolean, serviceFor: (file: string) => string, tsDirect: boolean): string[] {
   const worker = workerRelevant ? rawWorker : null; // a Worker that only forwards requests is not part of the plan
   const cases = report.cases as number[];
   const plan: string[] = [];
@@ -626,10 +635,10 @@ function makePlan(report: Json, lang: Lang, rawWorker: Wrangler | null, workerRe
       if (report.servers.gunicorn) plan.push("Pre-fork servers: nothing extra; the SDK restarts its export thread after fork.");
     }
   }
-  if (hasTypescript) plan.push(...typescriptPlan(report, worker, workerRelevant, nextProject, usesOpenai, entryOf, serviceFor));
-  if (cases.includes(6)) {
-    plan.push("TypeScript: register an OTLP exporter to the Zoroval endpoint with the key header; pass the chat id in experimental_telemetry metadata.");
-  }
+  // Case 6 with no direct OpenAI or Anthropic call: OpenTelemetry only, no zoroval package, init() or flush().
+  const otelOnly = cases.includes(6) && !tsDirect;
+  if (hasTypescript && !otelOnly) plan.push(...typescriptPlan(report, worker, workerRelevant, nextProject, usesOpenai, entryOf, serviceFor));
+  if (cases.includes(6)) plan.push(...otelPlan(report, otelOnly));
   if (lang !== "typescript") {
     plan.push("Run `zoroval login` (writes the key to the git-ignored env file), then `zoroval doctor`.");
   } else {
@@ -643,6 +652,39 @@ function makePlan(report: Json, lang: Lang, rawWorker: Wrangler | null, workerRe
   } else if (hasTypescript && (nextProject || report.deploy_files.length)) {
     plan.push("Production: make a deploy key in the app and add ZOROVAL_INGEST_KEY to the host's environment variables (for Vercel, the project's settings) yourself; the skill writes nothing there.");
   }
+  return plan;
+}
+
+/** Case 6: send OpenTelemetry to Zoroval. The Vercel AI SDK 7 moved telemetry to `@ai-sdk/otel`. */
+function otelPlan(report: Json, otelOnly: boolean): string[] {
+  const plan: string[] = [];
+  const exporter = "`registerOTel` from `@vercel/otel` with `traceExporter: new OTLPHttpJsonTraceExporter({ url: `${process.env.ZOROVAL_INGEST_URL ?? \"https://ingest.zoroval.com\"}/v1/traces`, headers: { Authorization: `Bearer ${process.env.ZOROVAL_INGEST_KEY}` } })`";
+  const hook = report.typescript?.nextjs ? "instrumentation.ts (Next.js runs its `register()`)" : "the file that sets up OpenTelemetry (instrumentation.ts in Next.js)";
+  const ai = report.tracing.vercel_ai as { spec: string; major: number | null } | undefined;
+  const candidate = (report.chat_id_candidates as Json[]).find((c) => isTsFile(c.file));
+  const chatId = candidate ? candidate.name : "chatId";
+  const at = candidate ? ` (candidate at ${candidate.file}:${candidate.line})` : "; no conversation id was found, so ask the developer which variable is the chat id";
+  if (otelOnly) plan.push("No `zoroval` package, `init()` or `flush()` is needed: the traces go to Zoroval over OpenTelemetry.");
+  const installed = report.packages.typescript as Record<string, string>;
+  const install = (names: string[], why = "") => {
+    const missing = names.filter((n) => !(n in installed));
+    if (missing.length) plan.push(`Install ${missing.map((n) => `\`${n}\``).join(" and ")}${why}.`);
+  };
+  if (!ai || (ai.major !== null && ai.major < 7)) install(["@vercel/otel"]);
+  if (!ai) {
+    plan.push(`In ${hook}: ${exporter}.`);
+    plan.push(`Set the chat id as the \`session.id\` attribute of the spans of each chat turn${at}.`);
+    return plan;
+  }
+  if (ai.major !== null && ai.major < 7) {
+    plan.push(`In ${hook}: ${exporter}.`);
+    plan.push(`On each AI SDK call (\`streamText\`, \`generateText\`), pass the chat id: \`experimental_telemetry: { isEnabled: true, functionId: "chat", metadata: { sessionId: ${chatId} } }\`${at}.`);
+    return plan;
+  }
+  if (ai.major === null) report.notes.push(`Vercel AI SDK version "${ai.spec}" has no number: the plan assumes AI SDK 7 or newer; for 6 or older use experimental_telemetry metadata.`);
+  install(["@ai-sdk/otel", "@vercel/otel"], ": AI SDK 7 sends telemetry only through a registered integration");
+  plan.push(`In ${hook}: \`registerTelemetry(new OpenTelemetry({ runtimeContext: true }))\` (\`registerTelemetry\` from \`ai\`, \`OpenTelemetry\` from \`@ai-sdk/otel\`), then ${exporter}.`);
+  plan.push(`On each AI SDK call (\`streamText\`, \`generateText\`), pass the chat id: \`runtimeContext: { sessionId: ${chatId} }, telemetry: { functionId: "chat", includeRuntimeContext: { sessionId: true } }\`${at}. Do not use \`experimental_telemetry\` metadata: AI SDK 7 drops it.`);
   return plan;
 }
 
@@ -664,8 +706,12 @@ function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: b
   } else {
     plan.push(`Add \`import * as zoroval from "zoroval"\` and call \`zoroval.init()\` once when the app starts${entry ? ` (for example in ${entry})` : ""}.`);
   }
-  if (tsCalls.some((c) => c.api !== "fetch") || (usesOpenai && !tsCalls.length && "openai" in report.packages.typescript)) {
+  const packages = report.packages.typescript as Record<string, string>;
+  if (tsCalls.some((c) => c.provider === "openai" && c.api !== "fetch") || (usesOpenai && !tsCalls.length && "openai" in packages)) {
     plan.push("Wrap the OpenAI client: `const openai = zoroval.wrapOpenAI(new OpenAI())`.");
+  }
+  if (tsCalls.some((c) => c.provider === "anthropic") || (!tsCalls.length && "@anthropic-ai/sdk" in packages)) {
+    plan.push("Wrap the Anthropic client: `const anthropic = zoroval.wrapAnthropic(new Anthropic())`.");
   }
   const fetchCalls = tsCalls.filter((c) => c.api === "fetch");
   if (fetchCalls.some((c) => !c.base_url)) plan.push("Use `zoroval.wrapFetch()` as the `fetch` for the calls to api.openai.com.");
@@ -675,7 +721,7 @@ function typescriptPlan(report: Json, worker: Wrangler | null, workerRelevant: b
     const at = fetchCalls.filter((c) => c.base_url).map((c) => `${c.file}:${c.line}`).slice(0, 3).join(", ");
     plan.push(`For the \`fetch\` calls whose base URL is not api.openai.com (${at}), pass that base so they are traced: \`zoroval.wrapFetch(fetch, { baseURLs: [${literal.length ? literal.map((b) => JSON.stringify(b)).join(", ") : "base"}] })\`${bases.includes("variable") ? ", with the same value the code builds the URL from (when it defaults to https://api.openai.com/v1, plain `zoroval.wrapFetch()` covers that default)" : ""}.`);
   }
-  if (tsCalls.length || usesOpenai) {
+  if (tsCalls.length || usesOpenai || "@anthropic-ai/sdk" in packages) {
     // A chat app always needs this step: with a candidate it says where, without one it says to ask.
     const candidate = (report.chat_id_candidates as Json[]).find((c) => isTsFile(c.file) && inScope(c.file));
     plan.push(candidate

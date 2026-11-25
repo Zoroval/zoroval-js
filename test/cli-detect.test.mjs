@@ -170,6 +170,84 @@ test("Next.js app: route handlers and pages/api are entry points, openai call fo
   assert.ok(out.plan.some((s) => s.startsWith("Production:") && s.includes("Vercel")));
 });
 
+// ------------------------------------------------------------------ Anthropic and the Vercel AI SDK
+
+test("Anthropic TypeScript app: messages.create and stream() are calls, Twilio's messages.create is not; plan wraps the client", () => {
+  const { out } = report("node-anthropic", TS_ENV);
+  assert.deepEqual(out.llm_calls, [
+    { file: "src/chat.ts", line: 6, provider: "anthropic", api: "messages.create" },
+    { file: "src/chat.ts", line: 7, provider: "anthropic", api: "messages.stream" },
+  ]);
+  assert.deepEqual(out.tracing, { openai: false, anthropic: true });
+  assert.deepEqual(out.cases, [1, 9], "OpenTelemetry packages beside a direct Anthropic call: still case 1");
+  assert.deepEqual(out.plan, [
+    "Install the package: `npm install zoroval` (or the project's package manager).",
+    "Add `import * as zoroval from \"zoroval\"` and call `zoroval.init()` once when the app starts.",
+    "Wrap the Anthropic client: `const anthropic = zoroval.wrapAnthropic(new Anthropic())`.",
+    "Wrap each chat turn in `zoroval.conversation(chatId, () => zoroval.turn({ input }, async (turn) => { ... }))` (candidate at src/chat.ts:5).",
+    "Long-running Node servers send spans in the background; in short scripts call `await zoroval.flush()` before exit.",
+    "Run `npx zoroval login` (writes the key to .env, which must be git-ignored), then `npx zoroval doctor`.",
+  ]);
+});
+
+const EXPORTER = "`registerOTel` from `@vercel/otel` with `traceExporter: new OTLPHttpJsonTraceExporter({ url: `${process.env.ZOROVAL_INGEST_URL ?? \"https://ingest.zoroval.com\"}/v1/traces`, headers: { Authorization: `Bearer ${process.env.ZOROVAL_INGEST_KEY}` } })`";
+
+test("Vercel AI SDK 7 app: no zoroval package, init() or flush(); @ai-sdk/otel with runtimeContext; the route's id is the chat id", () => {
+  const { out } = report("ai-sdk7", { ".env.local": `OPENAI_API_KEY=${FAKE_SECRET}\n` });
+  assert.deepEqual(out.cases, [6, 9]);
+  assert.deepEqual(out.tracing.vercel_ai, { spec: "^7.0.0", major: 7 });
+  assert.deepEqual(out.chat_id_candidates[0], { file: "app/api/chat/route.ts", line: 6, name: "id" });
+  assert.deepEqual(out.plan, [
+    "No `zoroval` package, `init()` or `flush()` is needed: the traces go to Zoroval over OpenTelemetry.",
+    "Install `@ai-sdk/otel` and `@vercel/otel`: AI SDK 7 sends telemetry only through a registered integration.",
+    `In instrumentation.ts (Next.js runs its \`register()\`): \`registerTelemetry(new OpenTelemetry({ runtimeContext: true }))\` (\`registerTelemetry\` from \`ai\`, \`OpenTelemetry\` from \`@ai-sdk/otel\`), then ${EXPORTER}.`,
+    "On each AI SDK call (`streamText`, `generateText`), pass the chat id: `runtimeContext: { sessionId: id }, telemetry: { functionId: \"chat\", includeRuntimeContext: { sessionId: true } }` (candidate at app/api/chat/route.ts:6). Do not use `experimental_telemetry` metadata: AI SDK 7 drops it.",
+    "Run `npx zoroval login` (writes the key to .env.local, which must be git-ignored), then `npx zoroval doctor`.",
+    "Production: make a deploy key in the app and add ZOROVAL_INGEST_KEY to the host's environment variables (for Vercel, the project's settings) yourself; the skill writes nothing there.",
+  ]);
+  assert.ok(!out.plan.some((step) => /npm install zoroval|zoroval\.init\(|zoroval\.flush\(/.test(step)));
+});
+
+test("Vercel AI SDK 6 app: registerOTel and experimental_telemetry metadata; a version with no number assumes AI SDK 7 and says so", () => {
+  const { out } = report("ai-sdk6", { ".env.local": "X=1\n" });
+  assert.deepEqual(out.plan.slice(0, 4), [
+    "No `zoroval` package, `init()` or `flush()` is needed: the traces go to Zoroval over OpenTelemetry.",
+    "Install `@vercel/otel`.",
+    `In instrumentation.ts (Next.js runs its \`register()\`): ${EXPORTER}.`,
+    "On each AI SDK call (`streamText`, `generateText`), pass the chat id: `experimental_telemetry: { isEnabled: true, functionId: \"chat\", metadata: { sessionId: id } }` (candidate at app/api/chat/route.ts:6).",
+  ]);
+  const dir = makeProject({ files: {
+    "package.json": JSON.stringify({ dependencies: { ai: "latest", "@ai-sdk/otel": "latest", "@vercel/otel": "^2.0.0" } }),
+    "chat.ts": "import { generateText } from \"ai\";\nexport const run = (chatId: string) => generateText({ prompt: chatId } as any);\n",
+  } });
+  const latest = JSON.parse(detect(dir, "--json").stdout);
+  assert.ok(latest.notes.some((n) => n.startsWith("Vercel AI SDK version \"latest\" has no number")));
+  assert.ok(latest.plan.some((step) => step.includes("runtimeContext: { sessionId: chatId }")));
+  assert.ok(!latest.plan.some((step) => step.startsWith("Install `")), "nothing to install: both packages are there");
+});
+
+test("AI SDK beside a direct OpenAI call: the SDK steps for the direct call, then the AI SDK steps", () => {
+  const dir = makeProject({ files: {
+    "package.json": JSON.stringify({ dependencies: { ai: "^7.0.0", openai: "^5.0.0" } }),
+    "chat.ts": "import OpenAI from \"openai\";\nconst openai = new OpenAI();\nexport const ask = (chatId: string) => openai.chat.completions.create({ model: \"m\", messages: [] });\n",
+  } });
+  const out = JSON.parse(detect(dir, "--json").stdout);
+  assert.deepEqual(out.cases, [1, 6, 9]);
+  assert.equal(out.plan[0], "Install the package: `npm install zoroval` (or the project's package manager).");
+  assert.ok(out.plan.includes("Wrap the OpenAI client: `const openai = zoroval.wrapOpenAI(new OpenAI())`."));
+  assert.ok(out.plan.some((step) => step.includes("registerTelemetry(new OpenTelemetry({ runtimeContext: true }))")));
+  assert.ok(!out.plan.some((step) => step.startsWith("No `zoroval` package")));
+});
+
+test("a destructured { id, messages } body names id; other ids do not", () => {
+  const files = {
+    "package.json": JSON.stringify({ dependencies: { openai: "^5.0.0" } }),
+    "a.ts": "export async function POST(req: Request) {\n  const { id, messages } = await req.json();\n  const { id: userId } = await req.json();\n  const { id: x, name } = other;\n  return f(id, messages);\n}\nfunction g({ id, name }) { return id; }\n",
+  };
+  const out = JSON.parse(detect(makeProject({ files }), "--json").stdout);
+  assert.deepEqual(out.chat_id_candidates.map((c) => `${c.line}:${c.name}`), ["2:id"]);
+});
+
 // ------------------------------------------------------------------ secrets, errors, limits
 
 test("no env value is ever printed, in JSON or text, and the setup report carries names only", async () => {
