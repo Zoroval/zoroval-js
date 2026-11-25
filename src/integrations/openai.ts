@@ -98,16 +98,23 @@ function reasoningText(source: Json): string {
   return Array.isArray(details) ? details.map((d: Json) => get(d, "text") || get(d, "summary") || "").filter((t: unknown) => typeof t === "string").join("") : "";
 }
 
-/** The parts of one chat message: reasoning first, then its content (annotations on the first text part). */
+/** The content parts of one chat message, with its annotations on the first text part. */
 function chatParts(msg: Json): Json[] {
-  const reasoning = reasoningText(msg);
-  const parts: Json[] = reasoning ? [{ type: "reasoning", content: reasoning }] : [];
-  const content = contentParts(get(msg, "content"));
+  const parts = contentParts(get(msg, "content"));
   const notes = get(msg, "annotations");
-  const first = content.find((p) => p.type === "text");
+  const first = parts.find((p) => p.type === "text");
   if (first && Array.isArray(notes) && notes.length && !first.annotations) first.annotations = toPlain(notes);
-  parts.push(...content);
   return parts;
+}
+
+/**
+ * An assistant message, with its reasoning as a message of its own before it (as a Responses reasoning item
+ * is). DeepSeek refuses `reasoning_content` in the history, so the reply sent back is the text message alone,
+ * and it still matches what was recorded.
+ */
+function withReasoning(msg: Json, message: Json): Json[] {
+  const reasoning = reasoningText(msg);
+  return reasoning ? [{ role: "assistant", parts: [{ type: "reasoning", content: reasoning }] }, message] : [message];
 }
 
 export function chatInputMessages(messages: Json): Json[] {
@@ -126,7 +133,7 @@ export function chatInputMessages(messages: Json): Json[] {
     }
     const item: Json = { role, parts };
     if (get(msg, "name")) item.name = get(msg, "name");
-    out.push(item);
+    out.push(...(role === "assistant" ? withReasoning(msg, item) : [item]));
   }
   return out;
 }
@@ -170,7 +177,7 @@ function chatFinish(gen: Generation, result: Json): void {
     if (get(message, "refusal")) parts.push({ type: "refusal", content: get(message, "refusal") });
     parts.push(...choiceCalls.map((c) => ({ type: "tool_call", ...c })));
     const reason = get(choice, "finish_reason");
-    outputs.push({ role: "assistant", parts, finish_reason: reason });
+    outputs.push(...withReasoning(message, { role: "assistant", parts, finish_reason: reason }));
     calls.push(...choiceCalls);
     reasons.push(reason);
   }
@@ -231,12 +238,10 @@ function chatStream(gen: Generation): StreamState {
       for (const index of [...choices.keys()].sort((a, b) => a - b)) {
         const slot = choices.get(index)!;
         const choiceCalls = [...slot.calls.keys()].sort((a, b) => a - b).map((i) => slot.calls.get(i));
-        const parts = chatParts({
-          reasoning: slot.reasoning.join("") || slot.details.join(""), content: slot.text.length ? slot.text.join("") : null, annotations: slot.notes,
-        });
+        const parts = chatParts({ content: slot.text.length ? slot.text.join("") : null, annotations: slot.notes });
         if (slot.refusal.length) parts.push({ type: "refusal", content: slot.refusal.join("") });
         parts.push(...choiceCalls.map((c) => ({ type: "tool_call", ...c })));
-        outputs.push({ role: "assistant", parts, finish_reason: slot.finish });
+        outputs.push(...withReasoning({ reasoning: slot.reasoning.join("") || slot.details.join("") }, { role: "assistant", parts, finish_reason: slot.finish }));
         calls.push(...choiceCalls);
         reasons.push(slot.finish);
       }

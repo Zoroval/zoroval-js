@@ -328,11 +328,15 @@ test("OpenAI-compatible providers: reasoning (DeepSeek, OpenRouter) in replies, 
   await zoroval.flush(3000);
   const [ds, or, gq] = gens(gateway).sort((a, b) => a.startTimeUnixNano.localeCompare(b.startTimeUnixNano));
   assert.deepEqual([ds, or, gq].map((g) => g.attrs["gen_ai.provider.name"]), ["deepseek", "openrouter", "groq"]);
-  assert.deepEqual(parsed(ds.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Peak hours are 8 to 10." }, { type: "text", content: "Mornings." }]);
-  assert.deepEqual(parsed(ds.attrs["gen_ai.input.messages"])[1].parts, [{ type: "reasoning", content: "Peak hours are 8 to 10." }, { type: "text", content: "Mornings." }]);
+  // Reasoning is a message of its own before the reply, so a reply sent back without it (DeepSeek refuses
+  // reasoning_content in the history) is the same message as the one recorded.
+  const thought = (content) => ({ role: "assistant", parts: [{ type: "reasoning", content }] });
+  const said = (content) => ({ role: "assistant", parts: [{ type: "text", content }], finish_reason: "stop" });
+  assert.deepEqual(parsed(ds.attrs["gen_ai.output.messages"]), [thought("Peak hours are 8 to 10."), said("Mornings.")]);
+  assert.deepEqual(parsed(ds.attrs["gen_ai.input.messages"]).slice(1, 3), [thought("Peak hours are 8 to 10."), { role: "assistant", parts: [{ type: "text", content: "Mornings." }] }]);
   // `reasoning` and `reasoning_details` carry the same text on OpenRouter: it is recorded once.
-  assert.deepEqual(parsed(or.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Think twice." }, { type: "text", content: "Done." }]);
-  assert.deepEqual(parsed(gq.attrs["gen_ai.output.messages"])[0].parts, [{ type: "reasoning", content: "Greeted." }, { type: "text", content: "Hi" }]);
+  assert.deepEqual(parsed(or.attrs["gen_ai.output.messages"]), [thought("Think twice."), said("Done.")]);
+  assert.deepEqual(parsed(gq.attrs["gen_ai.output.messages"]), [thought("Greeted."), said("Hi")]);
   assert.equal(gq.attrs["gen_ai.usage.input_tokens"], 9);
   assert.equal(gq.attrs["gen_ai.usage.output_tokens"], 2);
   await gateway.close();
