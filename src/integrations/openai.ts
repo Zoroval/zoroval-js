@@ -203,6 +203,21 @@ function chatStream(gen: Generation): StreamState {
 
 // ---------------------------------------------------------------------------- Responses
 
+/** OpenAI's built-in tools (web search, file search, code interpreter, MCP, ...) run inside OpenAI: one output
+ * item per call, with the query or code in a field of its own and no separate result item. */
+const BUILTIN_ARGS: Record<string, string> = {
+  web_search_call: "action", file_search_call: "queries", code_interpreter_call: "code", computer_call: "action",
+  local_shell_call: "action", mcp_call: "arguments", image_generation_call: "",
+};
+function builtinCall(kind: unknown, item: Json): Json | null {
+  if (typeof kind !== "string" || !kind.endsWith("_call") || kind === "function_call" || kind === "custom_tool_call") return null;
+  const name = kind === "mcp_call" ? String(get(item, "name") || "mcp") : kind.slice(0, -"_call".length);
+  const field = BUILTIN_ARGS[kind] ?? "action";
+  const raw = field ? get(item, field) : null;
+  const args = raw === null || raw === undefined ? "{}" : typeof raw === "string" ? raw : JSON.stringify(toPlain(raw));
+  return { type: "tool_call", id: get(item, "id"), name, arguments: args };
+}
+
 export function responsesInputMessages(value: Json): Json[] {
   if (!given(value)) return [];
   if (typeof value === "string") return [{ role: "user", parts: [textPart(value)] }];
@@ -217,6 +232,8 @@ export function responsesInputMessages(value: Json): Json[] {
       out.push({ role: "assistant", parts: [{ type: "tool_call", id: get(item, "call_id"), name: get(item, "name"), arguments: get(item, "input") }] });
     } else if (kind === null || kind === "message" || get(item, "role")) {
       out.push({ role: get(item, "role", "user"), parts: contentParts(get(item, "content")) });
+    } else if (builtinCall(kind, item)) {
+      out.push({ role: "assistant", parts: [builtinCall(kind, item)] });
     } else if (kind !== "reasoning") {
       out.push({ role: "unknown", parts: [{ type: String(kind) }] });
     }
@@ -236,6 +253,10 @@ function responsesOutput(response: Json): [Json[], Json[]] {
     } else if (kind === "reasoning") {
       const summary = get(item, "summary", []).map((s: Json) => get(s, "text") || "").join(" ");
       if (summary) parts.push({ type: "reasoning", content: summary });
+    } else if (builtinCall(kind, item)) {
+      const call = builtinCall(kind, item)!;
+      calls.push({ id: call.id, name: call.name, arguments: call.arguments });
+      parts.push(call);
     } else if (kind) parts.push({ type: String(kind) });
   }
   return [parts, calls];

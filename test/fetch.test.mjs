@@ -80,6 +80,38 @@ test("responses over fetch: stream and non-stream", async () => {
   await gateway.close();
 });
 
+test("responses: OpenAI's built-in tools (web search, file search, MCP) are tool calls with their query, in output and input", async () => {
+  const gateway = await setup();
+  const body = {
+    id: "resp_ws", model: "gpt-test", usage: { input_tokens: 5, output_tokens: 7 },
+    output: [
+      { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", query: "Lord's stadium events" } },
+      { type: "file_search_call", id: "fs_1", status: "completed", queries: ["ticket policy"] },
+      { type: "mcp_call", id: "mcp_1", name: "lookup", arguments: '{"q":"x"}', server_label: "s" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Check with the organiser." }] },
+    ],
+  };
+  const inner = async () => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  const tracedFetch = zoroval.wrapFetch(inner);
+  await zoroval.turn({}, async () => {
+    const history = [{ role: "user", content: "hi" }, { type: "web_search_call", id: "ws_0", status: "completed", action: { type: "search", query: "earlier" } }];
+    await (await tracedFetch("https://api.openai.com/v1/responses", { method: "POST", body: JSON.stringify({ model: "gpt-test", input: history, tools: [{ type: "web_search" }] }) })).json();
+  });
+  await zoroval.flush(3000);
+  const [gen] = gens(gateway);
+  const out = parsed(gen.attrs["gen_ai.output.messages"])[0].parts;
+  assert.deepEqual(out.slice(0, 3), [
+    { type: "tool_call", id: "ws_1", name: "web_search", arguments: '{"type":"search","query":"Lord\'s stadium events"}' },
+    { type: "tool_call", id: "fs_1", name: "file_search", arguments: '["ticket policy"]' },
+    { type: "tool_call", id: "mcp_1", name: "lookup", arguments: '{"q":"x"}' },
+  ]);
+  assert.equal(out[3].content, "Check with the organiser.");
+  assert.deepEqual(parsed(gen.attrs["zoroval.tool_calls"]).map((c) => c.name), ["web_search", "file_search", "lookup"]);
+  const input = parsed(gen.attrs["gen_ai.input.messages"]);
+  assert.deepEqual(input[1], { role: "assistant", parts: [{ type: "tool_call", id: "ws_0", name: "web_search", arguments: '{"type":"search","query":"earlier"}' }] });
+  await gateway.close();
+});
+
 test("everything that is not an OpenAI call passes straight through: same call, same result, no span", async () => {
   const gateway = await setup();
   const calls = [];

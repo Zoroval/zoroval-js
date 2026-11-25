@@ -2,6 +2,7 @@
 
 ## 0.2.1
 
+- OpenAI Responses: built-in tool calls (web search, file search, code interpreter, MCP and others) are recorded as tool calls with their query or arguments, in the output and in the input history. Before, only their type was kept.
 - `zoroval detect` finds OpenAI calls made through a name that holds `fetch` (`const doFetch = opts.fetchImpl ?? fetch; doFetch("https://api.openai.com/v1/responses")`) or a fetch-named function.
 - `zoroval detect` lists conversation ids in server code (Worker, handlers, files that call the model) before browser components, so the plan points at the server.
 
