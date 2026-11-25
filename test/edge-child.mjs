@@ -25,6 +25,19 @@ if (mode === "als-slow") {
   out.ms = Date.now() - started;
   out.status = zoroval.status();
 }
+if (mode === "als-anthropic") {
+  // An Edge route calling Claude through @anthropic-ai/sdk, wrapped with wrapAnthropic.
+  const { startFakeAnthropic } = await import("./fake-anthropic.mjs");
+  const Anthropic = (await import("@anthropic-ai/sdk")).default;
+  const fake = await startFakeAnthropic();
+  const anthropic = zoroval.wrapAnthropic(new Anthropic({ apiKey: "sk-ant-test", baseURL: fake.url, maxRetries: 0 }));
+  await zoroval.conversation("A", () => zoroval.turn({ input: "hi" }, async (turn) => {
+    const message = await anthropic.messages.stream({ model: "claude-test", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }).finalMessage();
+    turn.setOutput(message.content[0].text);
+  }));
+  out.flushed = await zoroval.flush(3000);
+  await fake.close();
+}
 out.warnings = warnings;
 console.log(JSON.stringify(out));
 process.exit(0);

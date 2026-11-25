@@ -29,6 +29,18 @@ import OpenAI from "openai";
 const openai = zoroval.wrapOpenAI(new OpenAI());
 ```
 
+## Anthropic
+
+Wrap your Anthropic client the same way. `messages.create()`, `messages.parse()` and `messages.stream()` are traced,
+with thinking, tool calls, server tools (web search, web fetch, code execution) and their results, citations and
+cache token counts.
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const anthropic = zoroval.wrapAnthropic(new Anthropic());
+```
+
 ## Conversations and turns
 
 Wrap the code that handles one chat message in `conversation()` and `turn()`. Every turn inside one

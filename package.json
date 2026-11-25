@@ -67,6 +67,7 @@
     "test:next": "node test/nextjs/run.mjs"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
     "@types/node": "^20.19.43",
     "edge-runtime": "^4.0.1",
     "esbuild": "^0.28.2",
@@ -77,9 +78,13 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.30.0",
     "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
     "openai": {
       "optional": true
     }
