@@ -14,7 +14,8 @@
  *   is returned as is: its `parse()` is hooked (everything that reads the body goes through it) and
  *   `asResponse()` ends the span without content, like Python's raw-response branch.
  * - No `_client_request_wrapped` check (OpenInference is not a JavaScript thing here).
- * - Responses `parse()` is wrapped; `gen_ai.provider.name` is `azure.ai.openai` for `AzureOpenAI`.
+ * - Responses `parse()` is wrapped; `gen_ai.provider.name` is `azure.ai.openai` for `AzureOpenAI`, and for other
+ *   clients comes from the base URL host (Groq, DeepSeek, OpenRouter, ...; `openai` for any host not listed).
  * - `server.port` only when the base URL names one (the same as Python's `base_url.port`).
  */
 
@@ -23,8 +24,8 @@ import { toPlain } from "../json.js";
 import { getState, tracingOff } from "../state.js";
 import type { AttrValue } from "../span.js";
 import { internalError } from "../util.js";
-import { Generation, get, given, mediaPart, safe, textPart, watchIterator } from "./common.js";
-import type { Json } from "./common.js";
+import { Generation, get, given, hostOf, mediaPart, stripInlineMedia, textPart, wrapMethod } from "./common.js";
+import type { CallMapper, Json, StreamState } from "./common.js";
 
 const REQUEST_PARAMS: Record<string, string> = {
   temperature: "gen_ai.request.temperature",
@@ -60,13 +61,20 @@ function requestAttributes(endpoint: Endpoint, body: Json): Record<string, AttrV
   return attrs;
 }
 
+/** A text part, with the provider's annotations (url_citation, file_citation, ...) when it sent any. */
+function noted(text: unknown, notes: Json): Json {
+  const part = textPart(text);
+  if (Array.isArray(notes) && notes.length) part.annotations = stripInlineMedia(toPlain(notes));
+  return part;
+}
+
 function contentParts(content: Json): Json[] {
   if (!given(content)) return [];
   if (typeof content === "string") return [textPart(content)];
   const parts: Json[] = [];
   for (const item of Array.isArray(content) ? content : []) {
     const kind = get(item, "type");
-    if (kind === "text" || kind === "input_text" || kind === "output_text") parts.push(textPart(get(item, "text")));
+    if (kind === "text" || kind === "input_text" || kind === "output_text") parts.push(noted(get(item, "text"), get(item, "annotations")));
     else if (kind === "refusal") parts.push({ type: "refusal", content: get(item, "refusal") });
     else if (kind === "image_url" || kind === "input_image") {
       const image = get(item, "image_url");
@@ -80,6 +88,35 @@ function contentParts(content: Json): Json[] {
 
 // ---------------------------------------------------------------------------- Chat Completions
 
+/** Reasoning text of OpenAI-compatible providers: DeepSeek `reasoning_content`, OpenRouter `reasoning` or `reasoning_details`. */
+function reasoningText(source: Json): string {
+  for (const key of ["reasoning_content", "reasoning"]) {
+    const value = get(source, key);
+    if (typeof value === "string" && value) return value;
+  }
+  const details = get(source, "reasoning_details");
+  return Array.isArray(details) ? details.map((d: Json) => get(d, "text") || get(d, "summary") || "").filter((t: unknown) => typeof t === "string").join("") : "";
+}
+
+/** The content parts of one chat message, with its annotations on the first text part. */
+function chatParts(msg: Json): Json[] {
+  const parts = contentParts(get(msg, "content"));
+  const notes = get(msg, "annotations");
+  const first = parts.find((p) => p.type === "text");
+  if (first && Array.isArray(notes) && notes.length && !first.annotations) first.annotations = stripInlineMedia(toPlain(notes));
+  return parts;
+}
+
+/**
+ * An assistant message, with its reasoning as a message of its own before it (as a Responses reasoning item
+ * is). DeepSeek refuses `reasoning_content` in the history, so the reply sent back is the text message alone,
+ * and it still matches what was recorded.
+ */
+function withReasoning(msg: Json, message: Json): Json[] {
+  const reasoning = reasoningText(msg);
+  return reasoning ? [{ role: "assistant", parts: [{ type: "reasoning", content: reasoning }] }, message] : [message];
+}
+
 export function chatInputMessages(messages: Json): Json[] {
   const out: Json[] = [];
   for (const msg of Array.isArray(messages) ? messages : []) {
@@ -88,7 +125,7 @@ export function chatInputMessages(messages: Json): Json[] {
     if (role === "tool" || role === "function") {
       parts = [{ type: "tool_call_response", id: get(msg, "tool_call_id"), response: get(msg, "content") }];
     } else {
-      parts = contentParts(get(msg, "content"));
+      parts = chatParts(msg);
       for (const call of get(msg, "tool_calls", [])) {
         const fn = get(call, "function");
         parts.push({ type: "tool_call", id: get(call, "id"), name: get(fn, "name"), arguments: get(fn, "arguments") });
@@ -96,7 +133,7 @@ export function chatInputMessages(messages: Json): Json[] {
     }
     const item: Json = { role, parts };
     if (get(msg, "name")) item.name = get(msg, "name");
-    out.push(item);
+    out.push(...(role === "assistant" ? withReasoning(msg, item) : [item]));
   }
   return out;
 }
@@ -136,11 +173,11 @@ function chatFinish(gen: Generation, result: Json): void {
   for (const choice of get(result, "choices", [])) {
     const message = get(choice, "message");
     const choiceCalls = chatToolCalls(message);
-    const parts = contentParts(get(message, "content"));
+    const parts = chatParts(message);
     if (get(message, "refusal")) parts.push({ type: "refusal", content: get(message, "refusal") });
     parts.push(...choiceCalls.map((c) => ({ type: "tool_call", ...c })));
     const reason = get(choice, "finish_reason");
-    outputs.push({ role: "assistant", parts, finish_reason: reason });
+    outputs.push(...withReasoning(message, { role: "assistant", parts, finish_reason: reason }));
     calls.push(...choiceCalls);
     reasons.push(reason);
   }
@@ -150,26 +187,38 @@ function chatFinish(gen: Generation, result: Json): void {
   });
 }
 
-interface StreamState {
-  observe(event: Json): void;
-  finish(error?: unknown): void;
+interface ChatSlot {
+  text: string[];
+  reasoning: string[];
+  details: string[];
+  notes: Json[];
+  refusal: string[];
+  calls: Map<number, Json>;
+  finish: Json;
 }
 
 function chatStream(gen: Generation): StreamState {
   let id: Json = null, model: Json = null, usage: Json = null;
-  const choices = new Map<number, { text: string[]; refusal: string[]; calls: Map<number, Json>; finish: Json }>();
+  const choices = new Map<number, ChatSlot>();
   return {
     observe(chunk) {
       id = id || get(chunk, "id");
       model = model || get(chunk, "model");
-      if (get(chunk, "usage")) usage = get(chunk, "usage");
+      // Groq sends the usage of a stream in `x_groq.usage` on the last chunk.
+      const seen = get(chunk, "usage") || get(get(chunk, "x_groq"), "usage");
+      if (seen) usage = seen;
       for (const choice of get(chunk, "choices", [])) {
         const index = get(choice, "index", 0) || 0;
         let slot = choices.get(index);
-        if (!slot) choices.set(index, (slot = { text: [], refusal: [], calls: new Map(), finish: null }));
+        if (!slot) choices.set(index, (slot = { text: [], reasoning: [], details: [], notes: [], refusal: [], calls: new Map(), finish: null }));
         const delta = get(choice, "delta");
         if (delta !== null) {
           if (get(delta, "content")) slot.text.push(get(delta, "content"));
+          for (const key of ["reasoning_content", "reasoning"]) if (typeof get(delta, key) === "string") slot.reasoning.push(get(delta, key));
+          const details = get(delta, "reasoning_details");
+          if (Array.isArray(details)) slot.details.push(reasoningText({ reasoning_details: details }));
+          const notes = get(delta, "annotations");
+          if (Array.isArray(notes)) slot.notes.push(...notes);
           if (get(delta, "refusal")) slot.refusal.push(get(delta, "refusal"));
           for (const call of get(delta, "tool_calls", [])) {
             const at = get(call, "index", 0) || 0;
@@ -189,10 +238,10 @@ function chatStream(gen: Generation): StreamState {
       for (const index of [...choices.keys()].sort((a, b) => a - b)) {
         const slot = choices.get(index)!;
         const choiceCalls = [...slot.calls.keys()].sort((a, b) => a - b).map((i) => slot.calls.get(i));
-        const parts: Json[] = slot.text.length ? [textPart(slot.text.join(""))] : [];
+        const parts = chatParts({ content: slot.text.length ? slot.text.join("") : null, annotations: slot.notes });
         if (slot.refusal.length) parts.push({ type: "refusal", content: slot.refusal.join("") });
         parts.push(...choiceCalls.map((c) => ({ type: "tool_call", ...c })));
-        outputs.push({ role: "assistant", parts, finish_reason: slot.finish });
+        outputs.push(...withReasoning({ reasoning: slot.reasoning.join("") || slot.details.join("") }, { role: "assistant", parts, finish_reason: slot.finish }));
         calls.push(...choiceCalls);
         reasons.push(slot.finish);
       }
@@ -203,42 +252,87 @@ function chatStream(gen: Generation): StreamState {
 
 // ---------------------------------------------------------------------------- Responses
 
+/**
+ * OpenAI's built-in tools (web search, file search, code interpreter, MCP, ...) run inside OpenAI: one item
+ * per call, holding the query or code and, when OpenAI returns it, the result. The call and its result are
+ * one assistant message: a `tool_call` and a `tool_call_response` with the same id.
+ */
+const BUILTIN_ARGS: Record<string, string> = {
+  web_search_call: "action", file_search_call: "queries", code_interpreter_call: "code", computer_call: "action",
+  local_shell_call: "action", mcp_call: "arguments", image_generation_call: "",
+};
+const BUILTIN_RESULT: Record<string, string> = {
+  file_search_call: "results", code_interpreter_call: "outputs", mcp_call: "output", image_generation_call: "result",
+};
+const asText = (value: Json): string => (typeof value === "string" ? value : JSON.stringify(toPlain(value)));
+
+function builtinParts(kind: unknown, item: Json): Json[] | null {
+  if (typeof kind !== "string" || !kind.endsWith("_call") || kind === "function_call" || kind === "custom_tool_call") return null;
+  const name = kind === "mcp_call" ? String(get(item, "name") || "mcp") : kind.slice(0, -"_call".length);
+  const id = get(item, "call_id") || get(item, "id");
+  const field = BUILTIN_ARGS[kind] ?? "action";
+  let raw = field ? get(item, field) : null;
+  let result: Json = null;
+  let failed = false;
+  if (kind === "web_search_call" && given(raw)) {
+    // The query is the argument; the sources OpenAI read are the result.
+    const { sources, ...action }: Json = toPlain(raw) ?? {};
+    result = Array.isArray(sources) && sources.length ? sources : null;
+    raw = (!given(action.type) || action.type === "search") && given(action.query)
+      ? Object.fromEntries(["query", "queries"].filter((k) => given(action[k])).map((k) => [k, action[k]]))
+      : action;
+  } else if (BUILTIN_RESULT[kind]) {
+    result = get(item, BUILTIN_RESULT[kind]!);
+    if (kind === "image_generation_call" && given(result)) result = "[image omitted]"; // base64 image: never sent
+    else if (kind === "mcp_call" && !given(result) && given(get(item, "error"))) {
+      result = get(item, "error");
+      failed = true;
+    }
+    if (given(result)) result = stripInlineMedia(toPlain(result));
+  }
+  const parts: Json[] = [{ type: "tool_call", id, name, arguments: given(raw) ? asText(raw) : "{}" }];
+  if (given(result)) {
+    const response: Json = { type: "tool_call_response", id, response: result };
+    if (failed) response.is_error = true;
+    parts.push(response);
+  }
+  return parts;
+}
+
+/** The messages for one Responses item, the same whether OpenAI returned it or the app sends it back as history. */
+function itemMessages(item: Json): Json[] {
+  const kind = get(item, "type");
+  if (kind === "function_call" || kind === "custom_tool_call") {
+    const args = get(item, kind === "function_call" ? "arguments" : "input");
+    return [{ role: "assistant", parts: [{ type: "tool_call", id: get(item, "call_id"), name: get(item, "name"), arguments: args }] }];
+  }
+  if (typeof kind === "string" && kind.endsWith("_call_output")) {
+    const output = kind === "computer_call_output" ? "[image omitted]" : toPlain(get(item, "output")); // a screenshot
+    return [{ role: "tool", parts: [{ type: "tool_call_response", id: get(item, "call_id"), response: output }] }];
+  }
+  if (kind === "reasoning") {
+    const summary = get(item, "summary", []).map((s: Json) => get(s, "text") || "").join(" ");
+    return summary ? [{ role: "assistant", parts: [{ type: "reasoning", content: summary }] }] : [];
+  }
+  if (kind === null || kind === "message" || get(item, "role")) return [{ role: get(item, "role", "user"), parts: contentParts(get(item, "content")) }];
+  const builtin = builtinParts(kind, item);
+  return [{ role: "assistant", parts: builtin ?? [{ type: String(kind) }] }];
+}
+
 export function responsesInputMessages(value: Json): Json[] {
   if (!given(value)) return [];
   if (typeof value === "string") return [{ role: "user", parts: [textPart(value)] }];
-  const out: Json[] = [];
-  for (const item of Array.isArray(value) ? value : []) {
-    const kind = get(item, "type");
-    if (kind === "function_call") {
-      out.push({ role: "assistant", parts: [{ type: "tool_call", id: get(item, "call_id"), name: get(item, "name"), arguments: get(item, "arguments") }] });
-    } else if (kind === "function_call_output" || kind === "custom_tool_call_output") {
-      out.push({ role: "tool", parts: [{ type: "tool_call_response", id: get(item, "call_id"), response: toPlain(get(item, "output")) }] });
-    } else if (kind === "custom_tool_call") {
-      out.push({ role: "assistant", parts: [{ type: "tool_call", id: get(item, "call_id"), name: get(item, "name"), arguments: get(item, "input") }] });
-    } else if (kind === null || kind === "message" || get(item, "role")) {
-      out.push({ role: get(item, "role", "user"), parts: contentParts(get(item, "content")) });
-    } else if (kind !== "reasoning") {
-      out.push({ role: "unknown", parts: [{ type: String(kind) }] });
-    }
-  }
-  return out;
+  return (Array.isArray(value) ? value : []).flatMap(itemMessages);
 }
 
+/** One assistant message per output item, and the tool calls among them. */
 function responsesOutput(response: Json): [Json[], Json[]] {
-  const parts: Json[] = [], calls: Json[] = [];
-  for (const item of get(response, "output", [])) {
-    const kind = get(item, "type");
-    if (kind === "message") parts.push(...contentParts(get(item, "content")));
-    else if (kind === "function_call" || kind === "custom_tool_call") {
-      const call = { id: get(item, "call_id"), name: get(item, "name"), arguments: get(item, kind === "function_call" ? "arguments" : "input") };
-      calls.push(call);
-      parts.push({ type: "tool_call", ...call });
-    } else if (kind === "reasoning") {
-      const summary = get(item, "summary", []).map((s: Json) => get(s, "text") || "").join(" ");
-      if (summary) parts.push({ type: "reasoning", content: summary });
-    } else if (kind) parts.push({ type: String(kind) });
+  const messages: Json[] = (get(response, "output", []) as Json[]).flatMap(itemMessages);
+  const calls: Json[] = [];
+  for (const message of messages) {
+    for (const part of message.parts) if (part.type === "tool_call") calls.push({ id: part.id, name: part.name, arguments: part.arguments });
   }
-  return [parts, calls];
+  return [messages, calls];
 }
 
 function responsesStart(endpoint: Endpoint, body: Json): Generation {
@@ -262,11 +356,17 @@ function responsesStart(endpoint: Endpoint, body: Json): Generation {
   return gen;
 }
 
+/** The finish reason goes on the last message (an empty assistant message when there is none). */
+function withReason(messages: Json[], reason: Json): Json[] {
+  if (!reason) return messages;
+  if (!messages.length) return [{ role: "assistant", parts: [], finish_reason: reason }];
+  return [...messages.slice(0, -1), { ...messages[messages.length - 1], finish_reason: reason }];
+}
+
 function responsesFinish(gen: Generation, response: Json, error?: unknown): void {
-  const [parts, calls] = responsesOutput(response);
+  const [messages, calls] = responsesOutput(response);
   const status = get(response, "status");
   const reason = get(get(response, "incomplete_details"), "reason") || status;
-  const outputs = parts.length || reason ? [{ role: "assistant", parts, finish_reason: reason }] : [];
   if (status === "failed" && !given(error)) {
     const err = get(response, "error");
     gen.set("error.type", String(get(err, "code") || "response_failed"));
@@ -274,7 +374,7 @@ function responsesFinish(gen: Generation, response: Json, error?: unknown): void
   }
   gen.finish({
     responseId: get(response, "id"), model: get(response, "model"), finishReasons: reason ? [reason] : [],
-    outputMessages: outputs, toolCalls: calls, usage: responsesUsage(get(response, "usage")), error,
+    outputMessages: withReason(messages, reason), toolCalls: calls, usage: responsesUsage(get(response, "usage")), error,
   });
 }
 
@@ -295,13 +395,12 @@ function responsesStream(gen: Generation): StreamState {
     },
     finish(error) {
       if (response !== null) return responsesFinish(gen, response, error);
-      let parts: Json[] = [], calls: Json[] = [];
-      if (items.length) [parts, calls] = responsesOutput({ output: items });
-      else if (text.length) parts = [textPart(text.join(""))];
+      let messages: Json[] = [], calls: Json[] = [];
+      if (items.length) [messages, calls] = responsesOutput({ output: items });
+      else if (text.length) messages = [{ role: "assistant", parts: [textPart(text.join(""))] }];
       if (failure !== null && !given(error)) gen.setError(String(get(failure, "message") || "stream error"));
       gen.finish({
-        responseId: id, model, finishReasons: ["incomplete"],
-        outputMessages: [{ role: "assistant", parts, finish_reason: "incomplete" }], toolCalls: calls, error,
+        responseId: id, model, finishReasons: ["incomplete"], outputMessages: withReason(messages, "incomplete"), toolCalls: calls, error,
       });
     },
   };
@@ -327,124 +426,37 @@ export function streamState(gen: Generation, api: Api): StreamState {
 
 // ---------------------------------------------------------------------------- wrapOpenAI
 
-const WRAPPED = Symbol.for("zoroval.wrapped");
-type Fn = (this: unknown, ...args: unknown[]) => unknown;
+/** Well-known `gen_ai.provider.name` values by API host (the same table as Python's `provider_from_host`). */
+const HOSTS: [string, string][] = [
+  ["api.openai.com", "openai"], ["openai.azure.com", "azure.ai.openai"], ["services.ai.azure.com", "azure.ai.inference"],
+  ["models.inference.ai.azure.com", "azure.ai.inference"], ["api.anthropic.com", "anthropic"], ["api.groq.com", "groq"],
+  ["api.deepseek.com", "deepseek"], ["openrouter.ai", "openrouter"], ["api.mistral.ai", "mistral_ai"], ["api.x.ai", "x_ai"],
+  ["api.perplexity.ai", "perplexity"], ["generativelanguage.googleapis.com", "gcp.gemini"], ["aiplatform.googleapis.com", "gcp.vertex_ai"],
+  ["api.together.xyz", "together_ai"], ["api.together.ai", "together_ai"], ["api.fireworks.ai", "fireworks"], ["api.cerebras.ai", "cerebras"],
+  ["api.cohere.ai", "cohere"], ["api.cohere.com", "cohere"], ["dashscope.aliyuncs.com", "alibaba"], ["dashscope-intl.aliyuncs.com", "alibaba"],
+  ["api.moonshot.ai", "moonshot"],
+];
 
-function providerName(client: Json): string {
-  return String(client?.constructor?.name ?? "").includes("Azure") ? "azure.ai.openai" : "openai";
+/** The provider a base URL host points at. Other Azure hosts stay Azure OpenAI; unknown hosts (localhost, proxies) stay `openai`. */
+export function providerOfHost(host: string | undefined): string {
+  const name = (host ?? "").toLowerCase().replace(/\.$/, "");
+  if (name.startsWith("bedrock") && (name.endsWith(".amazonaws.com") || name.endsWith(".api.aws"))) return "aws.bedrock";
+  const known = HOSTS.find(([suffix]) => name === suffix || name.endsWith("." + suffix));
+  if (known) return known[1];
+  return name.includes("azure") ? "azure.ai.openai" : "openai";
 }
 
 function endpointOf(api: Api, client: Json): Endpoint {
-  const endpoint: Endpoint = { api, provider: providerName(client) };
-  try {
-    const base = new URL(String(client?.baseURL));
-    endpoint.host = base.hostname;
-    if (base.port) endpoint.port = Number(base.port);
-  } catch {
-    /* no usable base URL */
-  }
-  return endpoint;
+  const at = hostOf(client?.baseURL);
+  const azure = String(client?.constructor?.name ?? "").includes("Azure");
+  return { api, provider: azure ? "azure.ai.openai" : providerOfHost(at.host), ...at };
 }
 
-const isStream = (value: Json): boolean =>
-  value !== null && typeof value === "object" && !("choices" in value) && !("output" in value) &&
-  (typeof value[Symbol.asyncIterator] === "function" || typeof value.iterator === "function");
-
-/** Watch the events of the provider's stream object in place; the app keeps reading the same object. */
-function watchStream(stream: Json, gen: Generation, state: StreamState): void {
-  const watch = (make: () => Json) => () => watchIterator(make(), gen, state.observe, state.finish);
-  // openai's Stream keeps its generator in `iterator`; `tee()` calls it directly, `for await` goes
-  // through Symbol.asyncIterator, which calls it too.
-  if (typeof stream.iterator === "function") {
-    const original = stream.iterator;
-    stream.iterator = watch(() => original.call(stream));
-  } else {
-    const original = stream[Symbol.asyncIterator];
-    stream[Symbol.asyncIterator] = watch(() => original.call(stream));
-  }
-}
-
-/**
- * Attach the span to the provider's returned promise without changing it. The openai `APIPromise`
- * reads the body only through `parse()`, so that is where the parsed value is seen; `asResponse()`
- * (raw body for the app) ends the span without content. The library's helpers derive new promises
- * with `_thenUnwrap()`: those are hooked the same way. Any other promise is observed with `then`.
- */
-function observeCall(call: Json, gen: Generation, api: Api): void {
-  let seen = false;
-  const onValue = (value: Json) => {
-    if (seen) return;
-    seen = true;
-    try {
-      if (value === null) gen.finish(); // raw response: the app reads the bytes itself
-      else if (isStream(value)) watchStream(value, gen, streamState(gen, api));
-      else finishResult(gen, api, value);
-    } catch (error) {
-      internalError("openai.finish", error);
-      gen.finish();
-    }
-  };
-  const onError = (error: unknown) => {
-    if (seen) return;
-    seen = true;
-    gen.fail(error);
-  };
-  const hook = (promise: Json): void => {
-    const { parse, asResponse, _thenUnwrap } = promise;
-    let requested = false;
-    promise.parse = function (this: unknown, ...args: unknown[]) {
-      const result = parse.apply(this, args);
-      if (!requested) {
-        requested = true;
-        (result as Promise<unknown>).then(onValue, onError);
-      }
-      return result;
-    };
-    promise.asResponse = function (this: unknown, ...args: unknown[]) {
-      const result = asResponse.apply(this, args);
-      if (!requested) {
-        requested = true;
-        (result as Promise<unknown>).then(() => onValue(null), onError);
-      }
-      return result;
-    };
-    if (typeof _thenUnwrap === "function") {
-      promise._thenUnwrap = function (this: unknown, ...args: unknown[]) {
-        const derived = _thenUnwrap.apply(this, args);
-        if (derived && typeof derived.parse === "function") hook(derived);
-        return derived;
-      };
-    }
-  };
-  if (call && typeof call.parse === "function" && typeof call.asResponse === "function") hook(call);
-  else if (call && typeof call.then === "function") call.then(onValue, onError);
-}
-
-function wrapMethod(owner: Json, method: string, api: Api, client: Json): void {
-  const original = owner?.[method] as Fn | undefined;
-  if (typeof original !== "function" || (original as Json)[WRAPPED]) return;
-  const wrapper: Fn = function (this: unknown, ...args) {
-    if (!getState()) return original.apply(this, args);
-    let gen: Generation | undefined;
-    try {
-      gen = startCall(endpointOf(api, client), args[0]);
-    } catch (error) {
-      internalError("openai.start", error);
-    }
-    if (!gen || !gen.active) return original.apply(this, args);
-    let call: unknown;
-    try {
-      call = gen.run(() => original.apply(this, args));
-    } catch (error) {
-      gen.fail(error);
-      throw error;
-    }
-    safe("openai.observe", () => observeCall(call, gen!, api));
-    return call;
-  };
-  (wrapper as Json)[WRAPPED] = true;
-  owner[method] = wrapper;
-}
+const mapper = (api: Api, client: Json): CallMapper => ({
+  start: (body) => startCall(endpointOf(api, client), body),
+  finish: (gen, result) => finishResult(gen, api, result),
+  stream: (gen) => streamState(gen, api),
+});
 
 /**
  * Trace the chat completions and responses calls of an OpenAI client, streaming or not. Returns the
@@ -457,8 +469,8 @@ export function wrapOpenAI<T extends object>(client: T): T {
   try {
     const c = client as Json;
     for (const method of ["create", "parse"]) {
-      wrapMethod(c?.chat?.completions, method, "chat", c);
-      wrapMethod(c?.responses, method, "responses", c);
+      wrapMethod(c?.chat?.completions, method, mapper("chat", c), "openai");
+      wrapMethod(c?.responses, method, mapper("responses", c), "openai");
     }
   } catch (error) {
     internalError("wrapOpenAI", error);

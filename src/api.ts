@@ -20,6 +20,7 @@ export type { ConversationOptions, TurnOptions, StepOptions, ToolOptions } from 
 export { init, flush, shutdown, status } from "./setup.js";
 export type { InitOptions } from "./config.js";
 export { wrapOpenAI } from "./integrations/openai.js";
+export { wrapAnthropic } from "./integrations/anthropic.js";
 export { wrapFetch } from "./integrations/fetch.js";
 export type { WrapFetchOptions } from "./integrations/fetch.js";
 export { withZoroval } from "./integrations/workers.js";

@@ -3,8 +3,9 @@
  * compiler. Strings, template literals, regular expressions and comments are skipped properly, so a
  * mention of `chat.completions.create(` in a comment or a string is not a call.
  *
- * Reports: OpenAI calls (`.chat.completions.create|parse|stream(`, `.responses.create|parse|stream(`,
- * `fetch(` to an OpenAI chat or responses URL, literal or built from a base variable), conversation-id candidates (parameters, properties, destructured
+ * Reports: Anthropic calls (`.messages.create|parse|stream(` in a file that imports `@anthropic-ai/sdk`), OpenAI
+ * calls (`.chat.completions.create|parse|stream(`, `.responses.create|parse|stream(`,
+ * `fetch(` or a fetch alias such as `doFetch(` to an OpenAI chat or responses URL, literal or built from a base variable), conversation-id candidates (parameters, properties, destructured
  * fields), module imports, and Worker entry points (`export default { fetch }`, `addEventListener("fetch")`).
  */
 
@@ -250,13 +251,23 @@ export function scanJs(source: string): JsScan {
   // URLs bound to a name (`const url = "https://api.openai.com/v1/..."`, `` `${base}/chat/completions` ``,
   // `base + "/responses"`), for `fetch(url)`
   const bound = new Map<string, string>();
+  // Names that hold `fetch` itself (`const doFetch = opts.fetchImpl ?? fetch`), so `doFetch(url)` counts as a fetch call.
+  const fetchAliases = new Set<string>();
   for (let i = 0; i + 2 < n; i++) {
     if (nm(i) && op(i + 1, "=") && !op(i + 2, "=", ">") && !dot(i - 1)) {
       const end = exprEnd(i + 2);
       if (end - (i + 2) <= 12 && toks.slice(i + 2, end).some((tok) => tok.k === "str")) bound.set(toks[i]!.v, urlText(i + 2, end));
+      if (end - (i + 2) <= 12 && toks.slice(i + 2, end).some((tok, k) => tok.k === "name" && tok.v === "fetch" && !dot(i + 1 + k))) fetchAliases.add(toks[i]!.v);
     }
   }
+  /** A call to `fetch`, to a name that holds it, or to a fetch-named function (`fetchImpl(url)`, `opts.fetchFn(url)`). */
+  const isFetchCall = (i: number): boolean => {
+    const v = toks[i]!.v;
+    if (v === "fetch") return !(dot(i - 1) && !nm(i - 2, "globalThis") && !nm(i - 2, "window") && !nm(i - 2, "self"));
+    return fetchAliases.has(v) || /fetch/i.test(v);
+  };
 
+  const messageCalls: [number, string, boolean][] = [];
   for (let i = 0; i < n; i++) {
     const t = toks[i]!;
     // ---- imports
@@ -285,9 +296,15 @@ export function scanJs(source: string): JsScan {
         result.llmCalls.push([toks[chainStart(i - 4)]!.line, `chat.completions.${m}`]);
       } else if ((m === "create" || m === "parse" || m === "stream") && nm(i - 2, "responses")) {
         result.llmCalls.push([toks[chainStart(i - 2)]!.line, `responses.${m}`]);
+      } else if ((m === "create" || m === "parse" || m === "stream") && nm(i - 2, "messages") && !nm(i - 4, "threads")) {
+        // Anthropic: counted below only in a file that imports the SDK or on a client named for it, since
+        // other libraries have `messages.create` too (Twilio, OpenAI Assistants threads).
+        const start = chainStart(i - 2);
+        const named = toks.slice(start, i - 2).some((tok) => tok.k === "name" && /anthropic|claude/i.test(tok.v));
+        messageCalls.push([toks[start]!.line, `messages.${m}`, named]);
       }
     }
-    if (t.k === "name" && t.v === "fetch" && op(i + 1, "(") && !(dot(i - 1) && !nm(i - 2, "globalThis") && !nm(i - 2, "window") && !nm(i - 2, "self"))) {
+    if (t.k === "name" && op(i + 1, "(") && isFetchCall(i)) {
       const arg = toks[i + 2];
       const end = exprEnd(i + 2);
       const url = arg?.k === "name" && end === i + 3 ? bound.get(arg.v) : urlText(i + 2, end);
@@ -342,7 +359,20 @@ export function scanJs(source: string): JsScan {
       } else if (op(next, "=>") && !op(prev, ".")) candidate = true; // chatId => ...
       if (candidate) result.chatIds.push([t.line, t.v]);
     }
+    // A chat route that destructures `{ id, messages }` from its body (the Vercel AI SDK's useChat sends that):
+    // `id` is the chat id.
+    if (nm(i, "id") && op(i - 1, "{", ",") && op(i + 1, "}", ",", "=") && toks[parent[i]!]?.v === "{") {
+      const open = parent[i]!;
+      const close = match[open]!;
+      const declared = nm(open - 1, "const") || nm(open - 1, "let") || nm(open - 1, "var") || op(open - 1, "(", ",");
+      let messages = false;
+      for (let j = open + 1; j < close; j++) if (parent[j] === open && nm(j, "messages") && op(j - 1, "{", ",")) messages = true;
+      if (declared && messages && close > 0 && op(close + 1, "=", ":", ")")) result.chatIds.push([t.line, "id"]);
+    }
   }
+  const anthropicFile = [...result.imports].some((m) => /^@anthropic-ai\/(sdk|bedrock-sdk|vertex-sdk)(\/|$)/.test(m));
+  for (const [line, api, named] of messageCalls) if (anthropicFile || named) result.llmCalls.push([line, api]);
+  result.llmCalls.sort((a, b) => a[0] - b[0]);
   result.cliMain = [...result.imports].some((m) => /^(node:)?readline(\/promises)?$/.test(m)) ||
     toks.some((t, i) => t.k === "name" && t.v === "process" && dot(i + 1) && nm(i + 2, "argv"));
   // Web servers come last: an import of the package plus the call that creates the app.

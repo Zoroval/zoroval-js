@@ -48,3 +48,15 @@ test("edge flush has a hard deadline: a stuck gateway is counted as failed, not 
   assert.ok(gateway.requests.length <= 3);
   await gateway.close();
 });
+
+test("edge entry: wrapAnthropic traces a streamed Claude reply in the conversation", { skip: await import("@anthropic-ai/sdk").then(() => false, (e) => `@anthropic-ai/sdk does not load here: ${e.message}`) }, async () => {
+  const gateway = await startGateway();
+  const out = await child("als-anthropic", gateway.url);
+  assert.equal(out.flushed, true);
+  const gen = gateway.spans().find((s) => s.attrs["zoroval.observation.type"] === "generation");
+  assert.equal(gen.attrs["gen_ai.provider.name"], "anthropic");
+  assert.equal(gen.attrs["zoroval.conversation.id"], "A");
+  assert.equal(JSON.parse(gen.attrs["gen_ai.output.messages"])[0].parts[0].content, "Hello there.");
+  assert.deepEqual(out.warnings, []);
+  await gateway.close();
+});

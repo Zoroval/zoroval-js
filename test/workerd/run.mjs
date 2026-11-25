@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KEY, startGateway } from "../gateway.mjs";
 import { startFakeOpenAI } from "../fake-openai.mjs";
+import { startFakeAnthropic } from "../fake-anthropic.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -20,11 +21,14 @@ symlinkSync(root, join(project, "node_modules", "zoroval"), "dir");
 cpSync(fileURLToPath(new URL("./worker.mjs", import.meta.url)), join(project, "worker.mjs"));
 cpSync(fileURLToPath(new URL("./openai-worker.mjs", import.meta.url)), join(project, "openai-worker.mjs"));
 cpSync(fileURLToPath(new URL("./class-worker.mjs", import.meta.url)), join(project, "class-worker.mjs"));
+cpSync(fileURLToPath(new URL("./anthropic-worker.mjs", import.meta.url)), join(project, "anthropic-worker.mjs"));
+mkdirSync(join(project, "node_modules", "@anthropic-ai"));
+symlinkSync(join(root, "node_modules", "@anthropic-ai", "sdk"), join(project, "node_modules", "@anthropic-ai", "sdk"), "dir");
 
-async function bundle(conditions, entry = "worker.mjs") {
+async function bundle(conditions, entry = "worker.mjs", platform = "neutral") {
   const result = await build({
     entryPoints: [join(project, entry)],
-    bundle: true, write: false, format: "esm", platform: "neutral", target: "es2022",
+    bundle: true, write: false, format: "esm", platform, target: "es2022",
     conditions, mainFields: ["module", "main"],
     external: ["node:*", "cloudflare:*"],
   });
@@ -153,6 +157,45 @@ async function runWorker(flags, gatewayUrl, paths) {
     assert.equal(JSON.parse(plain.attrs["zoroval.tool_calls"])[0].id, "call_abc123");
     assert.ok(gateway.requests.every((r) => r.headers["content-encoding"] === "gzip" && !r.parseError));
     console.log(`ok - workerd OpenAI Worker: wrapFetch + withZoroval, ${turns.length} turns in one conversation, streamed and non-streamed spans arrived after the response (${gateway.requests.length} request(s))`);
+  } finally {
+    await mf.dispose();
+    await fake.close();
+    await gateway.close();
+  }
+}
+
+// 4b. A Worker calling Claude through @anthropic-ai/sdk and wrapAnthropic: create() and stream() both traced.
+//     The SDK swaps its Node-only modules through its package.json `browser` map, which esbuild applies on
+//     its browser platform.
+{
+  const gateway = await startGateway();
+  const fake = await startFakeAnthropic();
+  const mf = new Miniflare({
+    modules: [{ type: "ESModule", path: "worker.mjs", contents: await bundle(["workerd", "worker", "browser"], "anthropic-worker.mjs", "browser") }],
+    compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_als"],
+    bindings: { ZOROVAL_INGEST_KEY: KEY, ZOROVAL_INGEST_URL: gateway.url, ANTHROPIC_BASE: fake.url },
+  });
+  try {
+    const first = await mf.dispatchFetch("http://worker.test/?chat=A");
+    assert.equal(first.status, 200, await first.clone().text());
+    assert.equal((await first.json()).content[1].id, "toolu_1");
+    const second = await mf.dispatchFetch("http://worker.test/?chat=A&stream=1");
+    assert.equal(second.status, 200, await second.clone().text());
+    assert.equal((await second.json()).content.at(-1).text, "It opens at 9.");
+    const gens = () => gateway.spans().filter((s) => s.attrs["zoroval.observation.type"] === "generation");
+    for (let i = 0; i < 100 && gens().length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    const [plain, streamed] = gens().sort((a, b) => a.startTimeUnixNano.localeCompare(b.startTimeUnixNano));
+    assert.equal(gens().length, 2);
+    for (const g of [plain, streamed]) {
+      assert.equal(g.attrs["gen_ai.provider.name"], "anthropic");
+      assert.equal(g.attrs["zoroval.conversation.id"], "A");
+      assert.equal(g.attrs["gen_ai.usage.input_tokens"], 115);
+    }
+    assert.equal(JSON.parse(plain.attrs["zoroval.tool_calls"])[0].id, "toolu_1");
+    const parts = JSON.parse(streamed.attrs["gen_ai.output.messages"])[0].parts;
+    assert.deepEqual(parts.map((p) => p.type), ["reasoning", "tool_call", "tool_call_response", "tool_call", "tool_call_response", "text"]);
+    assert.equal(parts.at(-1).citations[0].url, "https://louvre.fr/hours");
+    console.log(`ok - workerd Anthropic Worker: wrapAnthropic + withZoroval, create() and stream() spans in one conversation (${gateway.requests.length} request(s))`);
   } finally {
     await mf.dispose();
     await fake.close();
