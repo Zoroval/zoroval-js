@@ -8,7 +8,8 @@
  *   `beta.messages.create`) of that one client. `parse()` and `stream()` call `create` on the same object,
  *   so they need no patch of their own; the returned `APIPromise` and stream are the library's own.
  * - Server tool results are `tool_call_response` parts in the assistant message, with the id of their
- *   `server_tool_use` call and without the opaque `encrypted_*` fields; text parts keep `citations`.
+ *   `server_tool_use` call, without the opaque `encrypted_*` fields and with inline base64 replaced; text
+ *   parts keep `citations`.
  * - `gen_ai.usage.input_tokens` is the whole prompt: input plus cache reads plus cache writes (Anthropic's
  *   `input_tokens` counts only the uncached part); the cache counts are kept beside it.
  * - A `tool_result` given as a list of blocks is one string: the text blocks joined with a newline.
@@ -18,7 +19,7 @@ import { toPlain } from "../json.js";
 import { tracingOff } from "../state.js";
 import type { AttrValue } from "../span.js";
 import { internalError } from "../util.js";
-import { Generation, get, given, hostOf, mediaPart, textPart, withoutEncrypted, wrapMethod } from "./common.js";
+import { Generation, get, given, hostOf, mediaPart, textPart, stripInlineMedia, wrapMethod } from "./common.js";
 import type { CallMapper, Json, StreamState } from "./common.js";
 
 const REQUEST_PARAMS: Record<string, string> = {
@@ -45,7 +46,7 @@ export function blockParts(content: Json): Json[] {
     if (kind === "text") {
       const part = textPart(get(block, "text"));
       const citations = get(block, "citations");
-      if (Array.isArray(citations) && citations.length) part.citations = withoutEncrypted(toPlain(citations));
+      if (Array.isArray(citations) && citations.length) part.citations = stripInlineMedia(toPlain(citations));
       parts.push(part);
     } else if (kind === "tool_use" || kind.endsWith("_tool_use")) {
       // tool_use runs in the app; server_tool_use and mcp_tool_use run at Anthropic. All are tool calls.
@@ -53,7 +54,7 @@ export function blockParts(content: Json): Json[] {
     } else if (kind === "tool_result" || kind.endsWith("_tool_result")) {
       const inner = get(block, "content");
       const server = kind !== "tool_result";
-      const part: Json = { type: "tool_call_response", id: get(block, "tool_use_id"), response: server ? withoutEncrypted(toPlain(inner)) : resultText(inner) };
+      const part: Json = { type: "tool_call_response", id: get(block, "tool_use_id"), response: server ? stripInlineMedia(toPlain(inner)) : resultText(inner) };
       if (get(block, "is_error") || (server && String(get(inner, "type") ?? "").endsWith("_error"))) part.is_error = true;
       parts.push(part);
     } else if (kind === "thinking") parts.push({ type: "reasoning", content: get(block, "thinking") });

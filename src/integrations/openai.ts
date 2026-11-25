@@ -24,7 +24,7 @@ import { toPlain } from "../json.js";
 import { getState, tracingOff } from "../state.js";
 import type { AttrValue } from "../span.js";
 import { internalError } from "../util.js";
-import { Generation, get, given, hostOf, mediaPart, textPart, wrapMethod } from "./common.js";
+import { Generation, get, given, hostOf, mediaPart, stripInlineMedia, textPart, wrapMethod } from "./common.js";
 import type { CallMapper, Json, StreamState } from "./common.js";
 
 const REQUEST_PARAMS: Record<string, string> = {
@@ -64,7 +64,7 @@ function requestAttributes(endpoint: Endpoint, body: Json): Record<string, AttrV
 /** A text part, with the provider's annotations (url_citation, file_citation, ...) when it sent any. */
 function noted(text: unknown, notes: Json): Json {
   const part = textPart(text);
-  if (Array.isArray(notes) && notes.length) part.annotations = toPlain(notes);
+  if (Array.isArray(notes) && notes.length) part.annotations = stripInlineMedia(toPlain(notes));
   return part;
 }
 
@@ -103,7 +103,7 @@ function chatParts(msg: Json): Json[] {
   const parts = contentParts(get(msg, "content"));
   const notes = get(msg, "annotations");
   const first = parts.find((p) => p.type === "text");
-  if (first && Array.isArray(notes) && notes.length && !first.annotations) first.annotations = toPlain(notes);
+  if (first && Array.isArray(notes) && notes.length && !first.annotations) first.annotations = stripInlineMedia(toPlain(notes));
   return parts;
 }
 
@@ -278,21 +278,20 @@ function builtinParts(kind: unknown, item: Json): Json[] | null {
     // The query is the argument; the sources OpenAI read are the result.
     const { sources, ...action }: Json = toPlain(raw) ?? {};
     result = Array.isArray(sources) && sources.length ? sources : null;
-    raw = given(action.query) || given(action.queries)
+    raw = (!given(action.type) || action.type === "search") && given(action.query)
       ? Object.fromEntries(["query", "queries"].filter((k) => given(action[k])).map((k) => [k, action[k]]))
       : action;
-  } else if (kind === "mcp_call" && given(get(item, "error"))) {
-    result = toPlain(get(item, "error"));
-    failed = true;
   } else if (BUILTIN_RESULT[kind]) {
     result = get(item, BUILTIN_RESULT[kind]!);
-    if (kind === "image_generation_call" && given(result)) result = "[image omitted]";
-    else if (kind === "code_interpreter_call" && Array.isArray(result)) {
-      result = result.map((o: Json) => (get(o, "type") === "image" ? "[image omitted]" : toPlain(o)));
-    } else if (given(result)) result = toPlain(result);
+    if (kind === "image_generation_call" && given(result)) result = "[image omitted]"; // base64 image: never sent
+    else if (kind === "mcp_call" && !given(result) && given(get(item, "error"))) {
+      result = get(item, "error");
+      failed = true;
+    }
+    if (given(result)) result = stripInlineMedia(toPlain(result));
   }
   const parts: Json[] = [{ type: "tool_call", id, name, arguments: given(raw) ? asText(raw) : "{}" }];
-  if (given(result) && !(Array.isArray(result) && !result.length)) {
+  if (given(result)) {
     const response: Json = { type: "tool_call_response", id, response: result };
     if (failed) response.is_error = true;
     parts.push(response);
@@ -427,16 +426,24 @@ export function streamState(gen: Generation, api: Api): StreamState {
 
 // ---------------------------------------------------------------------------- wrapOpenAI
 
-/** OpenAI-compatible hosts, named as GenAI semconv names the provider. Any other host stays `openai`. */
-const HOSTS: [RegExp, string][] = [
-  [/azure/, "azure.ai.openai"], [/(^|\.)groq\.com$/, "groq"], [/(^|\.)deepseek\.com$/, "deepseek"], [/(^|\.)openrouter\.ai$/, "openrouter"],
-  [/(^|\.)anthropic\.com$/, "anthropic"], [/(^|\.)mistral\.ai$/, "mistral_ai"], [/(^|\.)x\.ai$/, "x_ai"],
-  [/^generativelanguage\.googleapis\.com$/, "gcp.gemini"], [/(^|\.)perplexity\.ai$/, "perplexity"], [/(^|\.)cohere\.(ai|com)$/, "cohere"],
+/** Well-known `gen_ai.provider.name` values by API host (the same table as Python's `provider_from_host`). */
+const HOSTS: [string, string][] = [
+  ["api.openai.com", "openai"], ["openai.azure.com", "azure.ai.openai"], ["services.ai.azure.com", "azure.ai.inference"],
+  ["models.inference.ai.azure.com", "azure.ai.inference"], ["api.anthropic.com", "anthropic"], ["api.groq.com", "groq"],
+  ["api.deepseek.com", "deepseek"], ["openrouter.ai", "openrouter"], ["api.mistral.ai", "mistral_ai"], ["api.x.ai", "x_ai"],
+  ["api.perplexity.ai", "perplexity"], ["generativelanguage.googleapis.com", "gcp.gemini"], ["aiplatform.googleapis.com", "gcp.vertex_ai"],
+  ["api.together.xyz", "together_ai"], ["api.together.ai", "together_ai"], ["api.fireworks.ai", "fireworks"], ["api.cerebras.ai", "cerebras"],
+  ["api.cohere.ai", "cohere"], ["api.cohere.com", "cohere"], ["dashscope.aliyuncs.com", "alibaba"], ["dashscope-intl.aliyuncs.com", "alibaba"],
+  ["api.moonshot.ai", "moonshot"],
 ];
 
+/** The provider a base URL host points at. Other Azure hosts stay Azure OpenAI; unknown hosts (localhost, proxies) stay `openai`. */
 export function providerOfHost(host: string | undefined): string {
-  const name = (host ?? "").toLowerCase();
-  return HOSTS.find(([pattern]) => pattern.test(name))?.[1] ?? "openai";
+  const name = (host ?? "").toLowerCase().replace(/\.$/, "");
+  if (name.startsWith("bedrock") && (name.endsWith(".amazonaws.com") || name.endsWith(".api.aws"))) return "aws.bedrock";
+  const known = HOSTS.find(([suffix]) => name === suffix || name.endsWith("." + suffix));
+  if (known) return known[1];
+  return name.includes("azure") ? "azure.ai.openai" : "openai";
 }
 
 function endpointOf(api: Api, client: Json): Endpoint {

@@ -117,7 +117,7 @@ test("responses: one assistant message per output item; built-in tools carry the
     { type: "tool_call", id: "fs_1", name: "file_search", arguments: '["ticket policy"]' },
     { type: "tool_call_response", id: "fs_1", response: [{ filename: "policy.md", score: 0.9, text: "No refunds." }] },
   ]);
-  assert.deepEqual(out[3].parts[1], { type: "tool_call_response", id: "ci_1", response: [{ type: "logs", logs: "1" }, "[image omitted]"] });
+  assert.deepEqual(out[3].parts[1], { type: "tool_call_response", id: "ci_1", response: [{ type: "logs", logs: "1" }, { type: "image", url: "[media omitted]" }] });
   assert.deepEqual(out[4].parts[1], { type: "tool_call_response", id: "mcp_1", response: { message: "server down" }, is_error: true });
   assert.deepEqual(out[5].parts, [{ type: "tool_call", id: "ig_1", name: "image_generation", arguments: "{}" }, { type: "tool_call_response", id: "ig_1", response: "[image omitted]" }]);
   assert.deepEqual(out[6].parts, [{ type: "tool_call", id: "call_1", name: "book", arguments: '{"seat":"A1"}' }]);

@@ -352,17 +352,21 @@ export function hostOf(baseURL: unknown): { host?: string; port?: number } {
   }
 }
 
+const OPAQUE = new Set(["encrypted_content", "encrypted_index", "encrypted_stdout"]);
+
 /**
- * A provider-run tool's result as content: the opaque `encrypted_*` fields providers attach to search results
- * and citations are dropped, and base64 data (a fetched PDF or image) becomes a placeholder.
+ * Plain JSON with inline media and opaque blobs replaced: a `data:` URL becomes "[media omitted]", base64
+ * data (a fetched PDF, a screenshot) "[base64 omitted]", and the providers' `encrypted_*` fields are dropped.
+ * Tool results of provider-run tools and citations go through it (the same rule as Python's `strip_inline_media`).
  */
-export function withoutEncrypted(value: Json): Json {
-  if (Array.isArray(value)) return value.map(withoutEncrypted);
+export function stripInlineMedia(value: Json): Json {
+  if (typeof value === "string") return value.startsWith("data:") ? "[media omitted]" : value;
+  if (Array.isArray(value)) return value.map(stripInlineMedia);
   if (value === null || typeof value !== "object") return value;
   const out: Json = {};
   for (const [key, item] of Object.entries(value)) {
-    if (key.startsWith("encrypted_")) continue;
-    out[key] = key === "data" && value.type === "base64" ? `[${value.media_type ?? "file"} omitted]` : withoutEncrypted(item);
+    if (OPAQUE.has(key)) continue;
+    out[key] = key === "data" && value.type === "base64" ? "[base64 omitted]" : stripInlineMedia(item);
   }
   return out;
 }

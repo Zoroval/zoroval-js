@@ -191,7 +191,7 @@ sdkTest("a web_fetch result holding a PDF keeps the document's shape with the ba
   const [gen] = gens(gateway);
   assert.equal(gen.attrs["gen_ai.provider.name"], "anthropic");
   const part = parsed(gen.attrs["gen_ai.input.messages"])[1].parts[0];
-  assert.deepEqual(part.response.content.source, { type: "base64", media_type: "application/pdf", data: "[application/pdf omitted]" });
+  assert.deepEqual(part.response.content.source, { type: "base64", media_type: "application/pdf", data: "[base64 omitted]" });
   assert.doesNotMatch(gen.attrs["gen_ai.input.messages"], /JVBERi0/);
   await gateway.close();
 });
